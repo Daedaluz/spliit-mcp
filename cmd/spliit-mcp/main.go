@@ -114,6 +114,13 @@ func runServe(ctx context.Context, configPath string) error {
 	}
 	log.Info("oidc provider discovered", "issuer", cfg.OIDC.Issuer)
 
+	if cfg.UnreachableSpliitDefault() {
+		log.Warn("the default Spliit URL names an internally-resolvable host; "+
+			"it is stored on every group and group links are built from it, so "+
+			"links will not open outside this network",
+			"spliit.default_url", cfg.Spliit.DefaultURL)
+	}
+
 	clients := spliit.NewClients(cfg.Spliit.Timeout)
 
 	mcpServer := appmcp.NewServer(appmcp.Deps{

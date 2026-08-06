@@ -144,11 +144,13 @@ func (t *tools) register(s *mcp.Server) {
 type listGroupsInput struct{}
 
 type groupSummary struct {
-	Alias           string `json:"alias"`
-	Name            string `json:"name"`
-	Currency        string `json:"currency"`
-	Server          string `json:"server"`
-	ServerURL       string `json:"server_url"`
+	Alias     string `json:"alias"`
+	Name      string `json:"name"`
+	Currency  string `json:"currency"`
+	Server    string `json:"server"`
+	ServerURL string `json:"server_url"`
+	// URL is the link to open the group in a browser.
+	URL             string `json:"url,omitempty"`
 	YouAre          string `json:"you_are,omitempty"`
 	NeedsSetup      bool   `json:"needs_setup,omitempty"`
 	SpliitGroupID   string `json:"spliit_group_id"`
@@ -180,6 +182,7 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 			YouAre:        g.ParticipantName,
 			SpliitGroupID: g.SpliitGroupID,
 			ServerURL:     g.BaseURL,
+			URL:           spliit.WebURL(g.BaseURL, g.SpliitGroupID),
 		}
 		if g.ParticipantID == "" {
 			summary.NeedsSetup = true
@@ -198,6 +201,9 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 	lines := make([]string, 0, len(out.Groups))
 	for _, g := range out.Groups {
 		line := fmt.Sprintf("%s — %s (%s, %s)", g.Alias, g.Name, g.Currency, g.Server)
+		if g.URL != "" {
+			line += " " + g.URL
+		}
 		if g.YouAre != "" {
 			line += ", you are " + g.YouAre
 		}
@@ -229,6 +235,7 @@ type getGroupOutput struct {
 	Name         string            `json:"name"`
 	Currency     string            `json:"currency"`
 	Server       string            `json:"server"`
+	URL          string            `json:"url,omitempty"`
 	YouAre       string            `json:"you_are,omitempty"`
 	Participants []participantInfo `json:"participants"`
 	Information  string            `json:"information,omitempty"`
@@ -259,6 +266,7 @@ func (t *tools) getGroup(ctx context.Context, req *mcp.CallToolRequest, in getGr
 		Name:     group.Name,
 		Currency: group.Currency,
 		Server:   spliit.HostOf(r.baseURL()),
+		URL:      spliit.WebURL(r.baseURL(), r.spliitID()),
 		YouAre:   r.group.ParticipantName,
 	}
 	if group.Information != nil {
@@ -274,8 +282,8 @@ func (t *tools) getGroup(ctx context.Context, req *mcp.CallToolRequest, in getGr
 			Active: active[p.ID],
 		})
 	}
-	return toolResult(fmt.Sprintf("%s — %d participants, currency %s.",
-		group.Name, len(out.Participants), group.Currency), out)
+	return toolResult(fmt.Sprintf("%s — %d participants, currency %s. %s",
+		group.Name, len(out.Participants), group.Currency, out.URL), out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,6 +1173,7 @@ type createGroupOutput struct {
 	Name          string   `json:"name"`
 	SpliitGroupID string   `json:"spliit_group_id"`
 	Server        string   `json:"server"`
+	URL           string   `json:"url,omitempty"`
 	YouAre        string   `json:"you_are"`
 	Participants  []string `json:"participants"`
 }
@@ -1230,11 +1239,12 @@ func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in cr
 
 	out := createGroupOutput{
 		Alias: stored.Alias, Name: group.Name, SpliitGroupID: group.ID,
-		Server: spliit.HostOf(baseURL), YouAre: stored.ParticipantName,
+		Server: spliit.HostOf(baseURL), URL: spliit.WebURL(baseURL, group.ID),
+		YouAre:       stored.ParticipantName,
 		Participants: spliit.ParticipantNames(group),
 	}
-	return toolResult(fmt.Sprintf("Created %q on %s with %s. Use alias %q in other tools.",
-		group.Name, out.Server, strings.Join(added, ", "), stored.Alias), out)
+	return toolResult(fmt.Sprintf("Created %q with %s. Use alias %q in other tools.\n%s",
+		group.Name, strings.Join(added, ", "), stored.Alias, out.URL), out)
 }
 
 // registerGroup stores a freshly created group against the caller, pinning the
@@ -1296,6 +1306,7 @@ type inspectGroupOutput struct {
 	Currency     string   `json:"currency"`
 	Server       string   `json:"server"`
 	ServerURL    string   `json:"server_url"`
+	URL          string   `json:"url,omitempty"`
 	Participants []string `json:"participants"`
 	// AlreadyJoined reports whether this group is already available to you.
 	AlreadyJoined bool   `json:"already_joined"`
@@ -1331,6 +1342,7 @@ func (t *tools) inspectGroup(ctx context.Context, req *mcp.CallToolRequest, in i
 	out := inspectGroupOutput{
 		GroupID: group.ID, Name: group.Name, Currency: group.Currency,
 		Server: spliit.HostOf(baseURL), ServerURL: baseURL,
+		URL:          spliit.WebURL(baseURL, group.ID),
 		Participants: spliit.ParticipantNames(group),
 	}
 
@@ -1369,6 +1381,7 @@ type joinGroupOutput struct {
 	Name          string `json:"name"`
 	SpliitGroupID string `json:"spliit_group_id"`
 	Server        string `json:"server"`
+	URL           string `json:"url,omitempty"`
 	YouAre        string `json:"you_are"`
 }
 
@@ -1424,7 +1437,8 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 			group.Name, participant.Name, stored.Alias),
 		joinGroupOutput{
 			Alias: stored.Alias, Name: group.Name, SpliitGroupID: group.ID,
-			Server: spliit.HostOf(baseURL), YouAre: participant.Name,
+			Server: spliit.HostOf(baseURL), URL: spliit.WebURL(baseURL, group.ID),
+			YouAre: participant.Name,
 		})
 }
 

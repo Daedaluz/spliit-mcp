@@ -206,6 +206,27 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// UnreachableSpliitDefault reports whether the default Spliit URL names a host
+// only this network can resolve.
+//
+// It is not fatal — an entirely internal deployment is legitimate — but the URL
+// is stored on every group and is what group links are built from, so an
+// internal address yields links nobody can open and makes one instance look
+// like two.
+func (c *Config) UnreachableSpliitDefault() bool {
+	parsed, err := url.Parse(c.Spliit.DefaultURL)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	for _, suffix := range []string{".svc", ".svc.cluster.local", ".local", ".internal"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return host == "localhost" && !strings.HasPrefix(c.PublicURL, "http://localhost")
+}
+
 // RedirectURI is the OIDC callback this server registers as a relying party.
 func (c *Config) RedirectURI() string { return c.PublicURL + "/auth/callback" }
 

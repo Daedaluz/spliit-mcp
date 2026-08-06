@@ -33,7 +33,10 @@ configMapGenerator:
       # this to restore replay protection.
       - SPLIIT_MCP_OIDC_SKIP_AUDIENCE_CHECK=true
 
-      # The Spliit instance in this cluster, seeded for new users. Reached over
-      # the cluster network, not its public hostname.
-      - SPLIIT_MCP_SPLIIT_DEFAULT_URL=http://spliit.spliit.svc.cluster.local:3000/api/trpc
-      - SPLIIT_MCP_SPLIIT_DEFAULT_NAME=spliit
+      # Deliberately the public hostname, not the cluster-internal service. The
+      # in-cluster address would save a hop, but this URL is stored on every
+      # group and is what group links are built from — an address only the
+      # cluster can resolve produces links nobody can open, and makes one Spliit
+      # instance look like two.
+      - SPLIIT_MCP_SPLIIT_DEFAULT_URL=https://split.inits.se/api/trpc
+      - SPLIIT_MCP_SPLIIT_DEFAULT_NAME=split.inits.se

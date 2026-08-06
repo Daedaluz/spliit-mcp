@@ -89,3 +89,27 @@ func TestMetadataReportsTheResource(t *testing.T) {
 		t.Errorf("authorization_servers = %v, want the configured issuer", servers)
 	}
 }
+
+// The default Spliit URL is stored on every group and is what group links are
+// built from, so an internally-resolvable host silently produces links nobody
+// can open. This is the check that would have caught it.
+func TestUnreachableSpliitDefaultIsDetected(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"http://spliit.spliit.svc.cluster.local:3000/api/trpc", true},
+		{"http://spliit.spliit.svc:3000/api/trpc", true},
+		{"http://spliit.internal/api/trpc", true},
+		{"https://split.inits.se/api/trpc", false},
+		{"https://spliit.app/api/trpc", false},
+		{"http://192.0.2.10:3000/api/trpc", false},
+	}
+	for _, c := range cases {
+		cfg := baseConfig()
+		cfg.Spliit.DefaultURL = c.url
+		if got := cfg.UnreachableSpliitDefault(); got != c.want {
+			t.Errorf("UnreachableSpliitDefault(%q) = %v, want %v", c.url, got, c.want)
+		}
+	}
+}

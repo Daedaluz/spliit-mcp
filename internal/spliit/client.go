@@ -302,6 +302,35 @@ func DeriveBaseURL(input string) string {
 	return ""
 }
 
+// WebURL renders the browser URL for a group, the inverse of DeriveBaseURL.
+//
+// Group links are what a user actually opens, so every tool that names a group
+// should hand one over. Returns "" when the base URL is not of the expected
+// shape, rather than guessing at something that would not open.
+func WebURL(baseURL, groupID string) string {
+	if groupID == "" {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+
+	prefix := strings.TrimSuffix(strings.Trim(parsed.Path, "/"), "api/trpc")
+	segments := []string{}
+	if prefix = strings.Trim(prefix, "/"); prefix != "" {
+		segments = append(segments, prefix)
+	}
+	segments = append(segments, "groups", groupID)
+
+	link := &url.URL{
+		Scheme: parsed.Scheme,
+		Host:   parsed.Host,
+		Path:   "/" + strings.Join(segments, "/"),
+	}
+	return link.String()
+}
+
 // HostOf renders a base URL as something worth showing a user: the host, plus
 // any subpath that distinguishes two instances on the same host.
 func HostOf(baseURL string) string {
