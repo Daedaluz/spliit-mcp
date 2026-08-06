@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/client"
@@ -46,6 +47,9 @@ type Provider struct {
 	// resourceServer performs token introspection, used when the provider
 	// issues opaque access tokens that cannot be verified locally.
 	resourceServer rs.ResourceServer
+
+	// cache holds recently verified tokens.
+	cache *verifyCache
 
 	// Discovery values republished to MCP clients.
 	AuthorizationEndpoint string
@@ -93,6 +97,7 @@ func New(ctx context.Context, cfg *appconfig.Config) (*Provider, error) {
 
 	p := &Provider{
 		cfg:                   cfg,
+		cache:                 newVerifyCache(),
 		RelyingParty:          relyingParty,
 		AuthorizationEndpoint: discovery.AuthorizationEndpoint,
 		TokenEndpoint:         discovery.TokenEndpoint,
@@ -131,27 +136,122 @@ func New(ctx context.Context, cfg *appconfig.Config) (*Provider, error) {
 	return p, nil
 }
 
+// maxVerifyCacheTTL caps how long a verified token is trusted without asking
+// the provider again. It bounds how stale a revocation can be.
+const maxVerifyCacheTTL = 5 * time.Minute
+
 // TokenVerifier returns a verifier for the MCP bearer middleware.
 //
 // JWT access tokens are verified locally against the issuer's JWKS; opaque
 // tokens fall back to introspection. Either way the audience is checked against
 // this server's resource identifier, so a token minted for a different service
 // at the same issuer cannot be replayed here.
+//
+// Results are cached briefly. Introspection is a network round-trip on every
+// single MCP request otherwise, which is both slow and a standing chance for a
+// transient failure to look like a rejected token.
 func (p *Provider) TokenVerifier() mcpauth.TokenVerifier {
 	return func(ctx context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
-		if p.verifier != nil {
-			info, err := p.verifyJWT(ctx, token)
-			if err == nil {
-				return info, nil
-			}
-			// Only fall through to introspection if there is one; otherwise the
-			// JWT error is the real answer.
-			if p.resourceServer == nil {
-				return nil, err
+		if info, ok := p.cache.get(token); ok {
+			return info, nil
+		}
+
+		info, err := p.verifyUncached(ctx, token)
+		if err != nil {
+			return nil, err
+		}
+		p.cache.put(token, info)
+		return info, nil
+	}
+}
+
+func (p *Provider) verifyUncached(ctx context.Context, token string) (*mcpauth.TokenInfo, error) {
+	if p.verifier != nil {
+		info, err := p.verifyJWT(ctx, token)
+		if err == nil {
+			return info, nil
+		}
+		// Only fall through to introspection if there is one; otherwise the
+		// JWT error is the real answer.
+		if p.resourceServer == nil {
+			return nil, err
+		}
+	}
+	return p.introspect(ctx, token)
+}
+
+// verifyCache holds recently verified tokens, keyed by a hash so the tokens
+// themselves are not held in memory.
+type verifyCache struct {
+	mu      sync.Mutex
+	entries map[[32]byte]verifyCacheEntry
+}
+
+type verifyCacheEntry struct {
+	info    *mcpauth.TokenInfo
+	expires time.Time
+}
+
+// cacheKeyFor hashes a token into its cache key.
+func cacheKeyFor(token string) [32]byte { return sha256.Sum256([]byte(token)) }
+
+// wrapInvalid marks an error as a rejected credential, which the bearer
+// middleware turns into a 401.
+func wrapInvalid(err error) error {
+	return fmt.Errorf("%w: %s", mcpauth.ErrInvalidToken, err)
+}
+
+func newVerifyCache() *verifyCache {
+	return &verifyCache{entries: make(map[[32]byte]verifyCacheEntry)}
+}
+
+func (c *verifyCache) get(token string) (*mcpauth.TokenInfo, bool) {
+	key := cacheKeyFor(token)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(entry.expires) {
+		delete(c.entries, key)
+		return nil, false
+	}
+	return entry.info, true
+}
+
+func (c *verifyCache) put(token string, info *mcpauth.TokenInfo) {
+	// Never outlive the token itself, and never trust a verification for longer
+	// than the cap, so a revocation is noticed reasonably soon.
+	expires := time.Now().Add(maxVerifyCacheTTL)
+	if !info.Expiration.IsZero() && info.Expiration.Before(expires) {
+		expires = info.Expiration
+	}
+	if !time.Now().Before(expires) {
+		return
+	}
+
+	key := cacheKeyFor(token)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Bound the map. Entries are short-lived, so a sweep of the expired ones is
+	// enough; the hard cap only guards against a flood of distinct tokens.
+	if len(c.entries) > 1024 {
+		now := time.Now()
+		for k, e := range c.entries {
+			if now.After(e.expires) {
+				delete(c.entries, k)
 			}
 		}
-		return p.introspect(ctx, token)
+		if len(c.entries) > 1024 {
+			clear(c.entries)
+		}
 	}
+	c.entries[key] = verifyCacheEntry{info: info, expires: expires}
 }
 
 func (p *Provider) verifyJWT(ctx context.Context, token string) (*mcpauth.TokenInfo, error) {
@@ -176,7 +276,11 @@ func (p *Provider) verifyJWT(ctx context.Context, token string) (*mcpauth.TokenI
 func (p *Provider) introspect(ctx context.Context, token string) (*mcpauth.TokenInfo, error) {
 	resp, err := rs.Introspect[*oidc.IntrospectionResponse](ctx, p.resourceServer, token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: introspection failed: %s", mcpauth.ErrInvalidToken, err)
+		// Deliberately not ErrInvalidToken. That maps to 401, which tells the
+		// client its credentials are bad and sends the user through a fresh
+		// login — the wrong answer when the fault is our own upstream call. A
+		// plain error becomes a 500, which clients retry.
+		return nil, fmt.Errorf("introspection request failed: %w", err)
 	}
 	if !resp.Active {
 		return nil, fmt.Errorf("%w: token is not active", mcpauth.ErrInvalidToken)
@@ -187,9 +291,17 @@ func (p *Provider) introspect(ctx context.Context, token string) (*mcpauth.Token
 	if err := p.checkScopes(resp.Scope); err != nil {
 		return nil, err
 	}
+	// The middleware rejects a token with no expiration outright. Providers do
+	// not always return one from introspection, so fall back to the cache
+	// lifetime: the token is re-introspected once it lapses either way.
+	expiry := resp.Expiration.AsTime()
+	if expiry.IsZero() {
+		expiry = time.Now().Add(maxVerifyCacheTTL)
+	}
+
 	return &mcpauth.TokenInfo{
 		Scopes:     resp.Scope,
-		Expiration: resp.Expiration.AsTime(),
+		Expiration: expiry,
 		UserID:     resp.Subject,
 		Extra:      map[string]any{"sub": resp.Subject, "email": resp.Email},
 	}, nil
