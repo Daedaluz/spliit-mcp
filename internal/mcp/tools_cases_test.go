@@ -355,3 +355,154 @@ func TestGetBalancesCarriesItsPayload(t *testing.T) {
 		t.Errorf("balances payload missing from text content: %s", text)
 	}
 }
+
+// expensesPage builds a canned groups.expenses.list response.
+func expensesPage(expenses []map[string]any, hasMore bool, next int) map[string]any {
+	return map[string]any{"expenses": expenses, "hasMore": hasMore, "nextCursor": next}
+}
+
+func expense(id, title, paidByID, paidByName string, amount int, sharedWith ...string) map[string]any {
+	paidFor := make([]map[string]any, 0, len(sharedWith))
+	for _, pid := range sharedWith {
+		paidFor = append(paidFor, map[string]any{"participantId": pid, "shares": 1})
+	}
+	return map[string]any{
+		"id": id, "title": title, "amount": amount,
+		"expenseDate": "2026-02-01T00:00:00Z",
+		"paidById":    paidByID,
+		"paidBy":      map[string]any{"id": paidByID, "name": paidByName},
+		"paidFor":     paidFor,
+		"splitMode":   "EVENLY",
+	}
+}
+
+// "What is my latest expense" used to answer with whoever paid last, because an
+// unfiltered list is the whole group's.
+func TestListExpensesMineFiltersToYou(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.expenses.list"] = expensesPage([]map[string]any{
+		expense("e1", "Anna's taxi", "p-anna", "Anna", 5000, "p-me", "p-anna"),
+		expense("e2", "My dinner", "p-me", "Tobias", 12000, "p-me", "p-anna"),
+		expense("e3", "Erik's beer", "p-erik", "Erik", 3000, "p-erik"),
+	}, false, 0)
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "list_expenses", map[string]any{
+		"group": "trip", "mine": true,
+	})
+	if isErr {
+		t.Fatalf("list_expenses errored: %s", text)
+	}
+
+	if !strings.Contains(text, "My dinner") {
+		t.Errorf("your own expense is missing: %s", text)
+	}
+	for _, other := range []string{"Anna's taxi", "Erik's beer"} {
+		if strings.Contains(text, other) {
+			t.Errorf("someone else's expense %q leaked into a mine=true result: %s", other, text)
+		}
+	}
+	// The summary must say whose these are.
+	if !strings.Contains(text, "paid by you") {
+		t.Errorf("summary should say the results are yours: %s", text)
+	}
+}
+
+// The other reading of "mine": expenses you share in, whoever paid.
+func TestListExpensesInvolvingMe(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.expenses.list"] = expensesPage([]map[string]any{
+		expense("e1", "Anna's taxi", "p-anna", "Anna", 5000, "p-me", "p-anna"),
+		expense("e3", "Erik's beer", "p-erik", "Erik", 3000, "p-erik"),
+	}, false, 0)
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "list_expenses", map[string]any{
+		"group": "trip", "involving": "me",
+	})
+	if isErr {
+		t.Fatalf("list_expenses errored: %s", text)
+	}
+	if !strings.Contains(text, "Anna's taxi") {
+		t.Errorf("an expense you share in is missing: %s", text)
+	}
+	if strings.Contains(text, "Erik's beer") {
+		t.Errorf("an expense you do not share in leaked in: %s", text)
+	}
+}
+
+// An unfiltered list must not read as the caller's own.
+func TestListExpensesUnfilteredSaysItIsTheWholeGroup(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.expenses.list"] = expensesPage([]map[string]any{
+		expense("e1", "Anna's taxi", "p-anna", "Anna", 5000, "p-me"),
+	}, false, 0)
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "list_expenses", map[string]any{"group": "trip"})
+	if isErr {
+		t.Fatalf("list_expenses errored: %s", text)
+	}
+	if !strings.Contains(text, "whole group") {
+		t.Errorf("unfiltered summary should say so: %s", text)
+	}
+	if !strings.Contains(text, "Tobias") {
+		t.Errorf("unfiltered summary should name who you are: %s", text)
+	}
+}
+
+func TestListExpensesFilterByNamedParticipant(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.expenses.list"] = expensesPage([]map[string]any{
+		expense("e1", "Anna's taxi", "p-anna", "Anna", 5000, "p-anna"),
+		expense("e2", "My dinner", "p-me", "Tobias", 12000, "p-me"),
+	}, false, 0)
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "list_expenses", map[string]any{
+		"group": "trip", "paid_by": "Anna",
+	})
+	if isErr {
+		t.Fatalf("list_expenses errored: %s", text)
+	}
+	if !strings.Contains(text, "Anna's taxi") || strings.Contains(text, "My dinner") {
+		t.Errorf("paid_by=Anna returned the wrong set: %s", text)
+	}
+}
+
+// Filtering happens after fetching, so a page can yield nothing; the tool must
+// keep paging rather than returning an empty result.
+func TestListExpensesPagesUntilItFindsYours(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	// First page is entirely somebody else's, second holds the caller's.
+	pages := []map[string]any{
+		expensesPage([]map[string]any{
+			expense("e1", "Anna's taxi", "p-anna", "Anna", 5000, "p-anna"),
+		}, true, 1),
+		expensesPage([]map[string]any{
+			expense("e2", "My dinner", "p-me", "Tobias", 12000, "p-me"),
+		}, false, 0),
+	}
+	call := 0
+	env.spliit.dynamic["groups.expenses.list"] = func() any {
+		page := pages[min(call, len(pages)-1)]
+		call++
+		return page
+	}
+
+	text, isErr := callTool(t, env.connect(t, "alice"), "list_expenses", map[string]any{
+		"group": "trip", "mine": true,
+	})
+	if isErr {
+		t.Fatalf("list_expenses errored: %s", text)
+	}
+	if !strings.Contains(text, "My dinner") {
+		t.Errorf("did not page past a non-matching page: %s", text)
+	}
+}

@@ -78,8 +78,10 @@ func NewServer(deps Deps) *mcp.Server {
 		Instructions: "Each tool takes a `group`, which is the alias shown by list_groups. " +
 			"Only groups the signed-in user has registered are reachable. " +
 			"Amounts are in the group's currency as decimal numbers, e.g. 12.50. " +
-			"When the user says \"I paid\" or \"my share\", that refers to the participant " +
-			"pinned as them in that group; leave paid_by empty to default to it. " +
+			"When the user says \"I\", \"me\" or \"my\", that means the participant set as them " +
+			"in that group. For writes, leave paid_by empty and it defaults to them. For reads, " +
+			"pass mine=true to list_expenses — an unfiltered list is the whole group's, and its " +
+			"most recent expense usually belongs to somebody else. " +
 			"Groups can also be joined and left through the tools; call get_server_info " +
 			"for this server's URLs when the user asks how to connect another client.",
 	})

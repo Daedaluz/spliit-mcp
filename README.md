@@ -125,7 +125,9 @@ user across instances, so tools only ever need the alias.
 `get_server_info`.
 
 Every tool takes `group` (an alias from `list_groups`). `create_expense` defaults
-to you having paid, split evenly between all participants. `get_balances` is
+to you having paid, split evenly between all participants. For reading, pass
+`mine=true` to `list_expenses` — an unfiltered list is the whole group's, so
+"my latest expense" would otherwise answer with whoever paid last. `get_balances` is
 framed relative to you ("You owe 120.00 SEK overall"). Amounts are decimal
 strings in the group's currency — money never passes through a float.
 

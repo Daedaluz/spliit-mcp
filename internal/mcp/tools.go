@@ -42,9 +42,11 @@ func (t *tools) register(s *mcp.Server) {
 	}, t.getBalances)
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "list_expenses",
-		Title:       "List expenses",
-		Description: "List a group's expenses, newest first, optionally filtered by a search term.",
+		Name:  "list_expenses",
+		Title: "List expenses",
+		Description: "List a group's expenses, newest first. Pass mine=true for expenses you paid " +
+			"— a question like \"my latest expense\" needs it, since the group's most recent " +
+			"expense is usually somebody else's. Also filters by paid_by, involving, and title text.",
 	}, t.listExpenses)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -395,6 +397,14 @@ type listExpensesInput struct {
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum expenses to return (default 20, max 100)"`
 	Cursor int    `json:"cursor,omitempty" jsonschema:"Pagination cursor from a previous call"`
 	Filter string `json:"filter,omitempty" jsonschema:"Only return expenses whose title matches this text"`
+	// Mine is how a question about "my expenses" gets answered correctly.
+	// Without it the whole group's expenses come back and the most recent one
+	// usually belongs to somebody else.
+	Mine   bool   `json:"mine,omitempty" jsonschema:"Only expenses you paid for. Use this for questions like 'my latest expense'"`
+	PaidBy string `json:"paid_by,omitempty" jsonschema:"Only expenses paid by this participant name"`
+	// Involving covers the other reading of "mine": expenses you share in,
+	// whoever actually paid.
+	Involving string `json:"involving,omitempty" jsonschema:"Only expenses this participant shares in, whoever paid. Pass 'me' for yourself"`
 }
 
 type expenseSummary struct {
@@ -433,29 +443,142 @@ func (t *tools) listExpenses(ctx context.Context, req *mcp.CallToolRequest, in l
 		limit = 100
 	}
 
-	var cursor *int
-	if in.Cursor > 0 {
-		cursor = &in.Cursor
-	}
 	var filter *string
 	if strings.TrimSpace(in.Filter) != "" {
 		filter = &in.Filter
 	}
 
-	page, err := t.deps.Clients.ListExpenses(ctx, r.baseURL(), r.spliitID(), &limit, cursor, filter)
+	// Resolve the participant filters to IDs before paging. Spliit can only
+	// filter by title, so who-paid and who-shares are applied here.
+	payerID, involvedID, err := t.resolveExpenseFilters(ctx, r, in)
 	if err != nil {
 		return toolError[listExpensesOutput](err)
 	}
 
 	out := listExpensesOutput{
 		Group: r.group.Alias, Currency: r.group.Currency,
-		Expenses: make([]expenseSummary, 0, len(page.Expenses)),
-		HasMore:  page.HasMore, NextCursor: page.NextCursor,
+		Expenses: make([]expenseSummary, 0, limit),
 	}
-	for i := range page.Expenses {
-		out.Expenses = append(out.Expenses, t.summarize(&page.Expenses[i], r.group.ParticipantID))
+
+	// Filtering happens after fetching, so a page may yield nothing. Keep
+	// pulling pages until the limit is met, bounded so a narrow filter over a
+	// long history cannot walk the whole group.
+	const maxPages = 10
+	cursor := in.Cursor
+	for page := 0; page < maxPages; page++ {
+		var cursorArg *int
+		if cursor > 0 {
+			cursorArg = &cursor
+		}
+
+		fetch := limit
+		result, err := t.deps.Clients.ListExpenses(ctx, r.baseURL(), r.spliitID(), &fetch, cursorArg, filter)
+		if err != nil {
+			return toolError[listExpensesOutput](err)
+		}
+
+		for i := range result.Expenses {
+			expense := &result.Expenses[i]
+			if payerID != "" && expense.PaidByID != payerID {
+				continue
+			}
+			if involvedID != "" && !sharesIn(expense, involvedID) {
+				continue
+			}
+			out.Expenses = append(out.Expenses, t.summarize(expense, r.group.ParticipantID))
+			if len(out.Expenses) == limit {
+				break
+			}
+		}
+
+		out.HasMore, out.NextCursor = result.HasMore, result.NextCursor
+		if len(out.Expenses) == limit || !result.HasMore {
+			break
+		}
+		cursor = result.NextCursor
 	}
-	return toolResult(fmt.Sprintf("%d expense(s) in %s.", len(out.Expenses), r.group.Alias), out)
+
+	return toolResult(t.expensesSummary(r, in, out), out)
+}
+
+// resolveExpenseFilters maps the participant filters onto IDs in this group.
+func (t *tools) resolveExpenseFilters(ctx context.Context, r resolved, in listExpensesInput) (payerID, involvedID string, err error) {
+	wantsMe := in.Mine ||
+		strings.EqualFold(strings.TrimSpace(in.PaidBy), "me") ||
+		strings.EqualFold(strings.TrimSpace(in.Involving), "me")
+
+	if wantsMe {
+		me, err := r.me()
+		if err != nil {
+			return "", "", err
+		}
+		if in.Mine || strings.EqualFold(strings.TrimSpace(in.PaidBy), "me") {
+			payerID = me
+		}
+		if strings.EqualFold(strings.TrimSpace(in.Involving), "me") {
+			involvedID = me
+		}
+	}
+
+	// Named participants need the group's roster to resolve.
+	named := (in.PaidBy != "" && payerID == "") || (in.Involving != "" && involvedID == "")
+	if !named {
+		return payerID, involvedID, nil
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return "", "", err
+	}
+	if in.PaidBy != "" && payerID == "" {
+		p, err := findByName(group, in.PaidBy)
+		if err != nil {
+			return "", "", err
+		}
+		payerID = p.ID
+	}
+	if in.Involving != "" && involvedID == "" {
+		p, err := findByName(group, in.Involving)
+		if err != nil {
+			return "", "", err
+		}
+		involvedID = p.ID
+	}
+	return payerID, involvedID, nil
+}
+
+// sharesIn reports whether a participant is among an expense's shares.
+func sharesIn(expense *model.Expense, participantID string) bool {
+	for _, pf := range expense.PaidFor {
+		if pf != nil && pf.ParticipantID == participantID {
+			return true
+		}
+	}
+	return false
+}
+
+// expensesSummary states plainly whose expenses these are, so a filtered answer
+// is not mistaken for the whole group's.
+func (t *tools) expensesSummary(r resolved, in listExpensesInput, out listExpensesOutput) string {
+	whose := "in " + r.group.Alias
+	switch {
+	case in.Mine || strings.EqualFold(strings.TrimSpace(in.PaidBy), "me"):
+		whose = fmt.Sprintf("paid by you (%s) in %s", r.group.ParticipantName, r.group.Alias)
+	case in.PaidBy != "":
+		whose = fmt.Sprintf("paid by %s in %s", in.PaidBy, r.group.Alias)
+	case strings.EqualFold(strings.TrimSpace(in.Involving), "me"):
+		whose = fmt.Sprintf("shared by you (%s) in %s", r.group.ParticipantName, r.group.Alias)
+	case in.Involving != "":
+		whose = fmt.Sprintf("shared by %s in %s", in.Involving, r.group.Alias)
+	}
+
+	summary := fmt.Sprintf("%d expense(s) %s.", len(out.Expenses), whose)
+	if r.group.ParticipantName != "" && whose == "in "+r.group.Alias {
+		// Unfiltered: name who "you" are so the whole group's list is not read
+		// as the caller's own.
+		summary += fmt.Sprintf(" These are the whole group's; you are %s.", r.group.ParticipantName)
+	}
+	return summary
 }
 
 func (t *tools) summarize(e *model.Expense, meID string) expenseSummary {

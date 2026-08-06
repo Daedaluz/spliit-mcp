@@ -29,6 +29,9 @@ type fakeSpliit struct {
 
 	// results maps a procedure name to the JSON payload to return.
 	results map[string]any
+	// dynamic overrides results for procedures whose response changes per call,
+	// which is how paging is exercised.
+	dynamic map[string]func() any
 
 	calls []recordedCall
 }
@@ -41,7 +44,7 @@ type recordedCall struct {
 func newFakeSpliit(t *testing.T) (*fakeSpliit, string) {
 	t.Helper()
 
-	f := &fakeSpliit{t: t, results: map[string]any{}}
+	f := &fakeSpliit{t: t, results: map[string]any{}, dynamic: map[string]func() any{}}
 	server := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(server.Close)
 	return f, server.URL + "/api/trpc"
@@ -77,6 +80,9 @@ func (f *fakeSpliit) serve(w http.ResponseWriter, r *http.Request) {
 		})
 
 		result, ok := f.results[endpoint]
+		if next, dyn := f.dynamic[endpoint]; dyn {
+			result, ok = next(), true
+		}
 		if !ok {
 			envelopes = append(envelopes, map[string]any{
 				"error": map[string]any{
@@ -216,6 +222,11 @@ func (b bearerRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	clone := r.Clone(r.Context())
 	clone.Header.Set("Authorization", "Bearer "+b.token)
 	return b.base.RoundTrip(clone)
+}
+
+// callTool is an alias for call, for tests that shadow the name.
+func callTool(t *testing.T, session *mcpsdk.ClientSession, name string, args map[string]any) (string, bool) {
+	return call(t, session, name, args)
 }
 
 // call invokes a tool and returns its text content plus whether it errored.
