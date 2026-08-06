@@ -30,9 +30,9 @@ ARG CREATED
 # org.opencontainers.image.source is what links the GHCR package to the GitHub
 # repository, which is also what makes the package inherit the repo's
 # visibility and permissions. Without it the published package is orphaned.
-LABEL org.opencontainers.image.source="https://github.com/daedaluz/spliit-mcp" \
-      org.opencontainers.image.url="https://github.com/daedaluz/spliit-mcp" \
-      org.opencontainers.image.documentation="https://github.com/daedaluz/spliit-mcp#readme" \
+LABEL org.opencontainers.image.source="https://github.com/Daedaluz/spliit-mcp" \
+      org.opencontainers.image.url="https://github.com/Daedaluz/spliit-mcp" \
+      org.opencontainers.image.documentation="https://github.com/Daedaluz/spliit-mcp#readme" \
       org.opencontainers.image.title="spliit-mcp" \
       org.opencontainers.image.description="MCP server for Spliit, with OIDC authorization and a config web UI" \
       org.opencontainers.image.licenses="MIT" \

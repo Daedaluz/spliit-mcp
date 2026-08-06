@@ -20,9 +20,9 @@ ARG CREATED
 
 # See Dockerfile.backend: image.source is what attaches the GHCR package to the
 # repository.
-LABEL org.opencontainers.image.source="https://github.com/daedaluz/spliit-mcp" \
-      org.opencontainers.image.url="https://github.com/daedaluz/spliit-mcp" \
-      org.opencontainers.image.documentation="https://github.com/daedaluz/spliit-mcp#readme" \
+LABEL org.opencontainers.image.source="https://github.com/Daedaluz/spliit-mcp" \
+      org.opencontainers.image.url="https://github.com/Daedaluz/spliit-mcp" \
+      org.opencontainers.image.documentation="https://github.com/Daedaluz/spliit-mcp#readme" \
       org.opencontainers.image.title="spliit-mcp-frontend" \
       org.opencontainers.image.description="Config web UI for spliit-mcp" \
       org.opencontainers.image.licenses="MIT" \
