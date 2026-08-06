@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,4 +250,37 @@ func ParticipantNames(group *model.Group) []string {
 		}
 	}
 	return names
+}
+
+// FindParticipantByName returns the participant with the given name,
+// case-insensitively, or nil.
+func FindParticipantByName(group *model.Group, name string) *model.Participant {
+	want := strings.TrimSpace(name)
+	for _, p := range group.Participants {
+		if p != nil && strings.EqualFold(strings.TrimSpace(p.Name), want) {
+			return p
+		}
+	}
+	return nil
+}
+
+// ExtractGroupID accepts either a bare group ID or a full Spliit URL such as
+// https://spliit.app/groups/<id>/expenses, since pasting the browser URL is the
+// natural thing to do when naming a group.
+func ExtractGroupID(input string) string {
+	if !strings.Contains(input, "/") {
+		return input
+	}
+	parsed, err := url.Parse(input)
+	if err != nil {
+		return input
+	}
+
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for i, part := range parts {
+		if part == "groups" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return input
 }

@@ -97,12 +97,14 @@ Two deployment shapes, as in `nextstop`:
 ## Using it
 
 1. Sign in to the config page.
-2. Set **your name** — the one you go by in Spliit. It is matched against
-   participants when you add a group.
-3. Add a group by pasting its ID or full Spliit URL. The group is fetched
-   read-only first; if exactly one participant matches your name it is pinned
-   automatically, otherwise you pick from the list.
-4. Connect your MCP client:
+2. Under **Settings**, set **your name** — the one you go by in Spliit. It is
+   matched against participants when you join a group.
+3. **Join a group** by pasting its ID or full Spliit URL, or **create** one
+   outright. Joining fetches the group read-only first; if exactly one
+   participant matches your name it is preselected, otherwise you pick yourself.
+4. The **Groups** tab shows what your client can reach, and flags any group
+   whose participant needs re-picking.
+5. Connect your MCP client:
 
 ```sh
 claude mcp add --transport http spliit https://spliit-mcp.example.com/mcp
@@ -114,14 +116,22 @@ ever need the alias.
 
 ## Tools
 
-`list_groups`, `get_group`, `get_balances`, `list_expenses`, `get_expense`,
-`create_expense`, `update_expense`, `delete_expense`, `get_stats`,
-`list_activities`, `list_categories`, `create_group`.
+**Expenses and balances** — `list_groups`, `get_group`, `get_balances`,
+`list_expenses`, `get_expense`, `create_expense`, `update_expense`,
+`delete_expense`, `get_stats`, `list_activities`, `list_categories`.
+
+**Group management**, mirroring the settings page — `inspect_group`,
+`join_group`, `leave_group`, `create_group`, `set_active_participant`.
 
 Every tool takes `group` (an alias from `list_groups`). `create_expense` defaults
 to you having paid, split evenly between all participants. `get_balances` is
 framed relative to you ("You owe 120.00 SEK overall"). Amounts are decimal
 strings in the group's currency — money never passes through a float.
+
+Joining always requires naming which participant is you, whether through the UI
+or `join_group`; `inspect_group` reads a group without joining so those names
+can be discovered first. A group joined without that identity could not be
+written to at all, so it is asked for up front rather than deferred.
 
 ## Credits
 

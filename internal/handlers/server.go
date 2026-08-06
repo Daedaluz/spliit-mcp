@@ -89,6 +89,7 @@ func (s *Server) Routes() http.Handler {
 		api.GET("/groups", s.ListGroups)
 		api.POST("/groups/preview", s.PreviewGroup)
 		api.POST("/groups", s.CreateGroup)
+		api.POST("/groups/new", s.CreateSpliitGroup)
 		api.PATCH("/groups/:id", s.UpdateGroup)
 		api.DELETE("/groups/:id", s.DeleteGroup)
 	}

@@ -101,11 +101,22 @@ export const api = {
       body: JSON.stringify({ server_id, group_id }),
     }),
 
-  createGroup: (server_id: string, group_id: string, alias: string, participant_id: string) =>
+  /** Join an existing Spliit group. participant_id is required — see the API. */
+  joinGroup: (server_id: string, group_id: string, alias: string, participant_id: string) =>
     request<Group>('/api/groups', {
       method: 'POST',
       body: JSON.stringify({ server_id, group_id, alias, participant_id }),
     }),
+
+  /** Create a brand new group in Spliit and join it in one step. */
+  createGroup: (body: {
+    server_id: string
+    name: string
+    currency: string
+    alias: string
+    participants: string[]
+    your_name: string
+  }) => request<Group>('/api/groups/new', { method: 'POST', body: JSON.stringify(body) }),
 
   updateGroup: (id: string, patch: { alias?: string; participant_id?: string }) =>
     request<Group>(`/api/groups/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),

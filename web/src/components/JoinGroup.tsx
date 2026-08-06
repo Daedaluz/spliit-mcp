@@ -1,23 +1,20 @@
 import { useState } from 'react'
-import { api, GroupPreview, Server } from './api'
-
-interface Props {
-  servers: Server[]
-  onAdded: () => void
-  onError: (message: string | null) => void
-}
+import { AppData } from '../App'
+import { api, GroupPreview } from '../api'
 
 /**
- * Two-step add flow. Step one fetches the group from Spliit read-only so we can
- * show its real participants; step two commits it with the participant that
- * represents you.
+ * Two-step join. Step one reads the group from Spliit without storing anything,
+ * so the real participant list can be shown; step two commits it.
  *
- * The lookup step exists because a group ID is the only credential Spliit has —
- * pasting a wrong one should fail visibly here, not silently produce a broken
- * row that only errors later during a tool call.
+ * The lookup exists because a group ID is the only credential Spliit has — a
+ * wrong one should fail visibly here rather than leave a broken row that only
+ * errors later during a tool call. Choosing who you are is mandatory, since a
+ * group joined without that identity cannot be written to at all.
  */
-export function AddGroup({ servers, onAdded, onError }: Props) {
-  const [serverId, setServerId] = useState(servers[0]?.id ?? '')
+export function JoinGroup({ data }: { data: AppData }) {
+  const { servers, reload, onError } = data
+
+  const [serverId, setServerId] = useState('')
   const [groupId, setGroupId] = useState('')
   const [preview, setPreview] = useState<GroupPreview | null>(null)
   const [alias, setAlias] = useState('')
@@ -42,16 +39,13 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
     }
   }
 
-  async function add() {
+  async function join() {
     setBusy(true)
     onError(null)
     try {
-      await api.createGroup(effectiveServerId, preview!.group_id, alias.trim(), participantId)
-      setPreview(null)
-      setGroupId('')
-      setAlias('')
-      setParticipantId('')
-      onAdded()
+      await api.joinGroup(effectiveServerId, preview!.group_id, alias.trim(), participantId)
+      reset()
+      await reload()
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -59,10 +53,17 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
     }
   }
 
+  function reset() {
+    setPreview(null)
+    setGroupId('')
+    setAlias('')
+    setParticipantId('')
+  }
+
   if (servers.length === 0) {
     return (
       <section className="card">
-        <h2>Add a group</h2>
+        <h2>Join a group</h2>
         <p className="muted">Add a Spliit server first.</p>
       </section>
     )
@@ -70,13 +71,14 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
 
   return (
     <section className="card">
-      <h2>Add a group</h2>
+      <h2>Join a group</h2>
 
       {!preview ? (
         <>
           <p className="muted">
-            Paste a group ID or the full Spliit group URL. Anyone with a group ID
-            has full access to it, which is why they live behind your login here.
+            Paste a group ID or the full Spliit group URL. Anyone holding a group
+            ID has full access to that group, which is why they live behind your
+            login here.
           </p>
           <div className="row">
             {servers.length > 1 && (
@@ -86,7 +88,9 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
                 aria-label="Spliit server"
               >
                 {servers.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
                 ))}
               </select>
             )}
@@ -96,11 +100,7 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
               placeholder="Group ID or https://spliit.app/groups/…"
               aria-label="Group ID"
             />
-            <button
-              className="button primary"
-              disabled={!groupId.trim() || busy}
-              onClick={lookup}
-            >
+            <button className="button primary" disabled={!groupId.trim() || busy} onClick={lookup}>
               {busy ? 'Looking up…' : 'Look up'}
             </button>
           </div>
@@ -122,7 +122,7 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
           </label>
 
           <fieldset className="field">
-            <legend>Which participant are you?</legend>
+            <legend>Which participant are you? (required)</legend>
             {preview.suggested_participant ? (
               <p className="muted">
                 Matched <strong>{preview.suggested_from_name}</strong> automatically.
@@ -154,11 +154,11 @@ export function AddGroup({ servers, onAdded, onError }: Props) {
             <button
               className="button primary"
               disabled={!alias.trim() || !participantId || busy}
-              onClick={add}
+              onClick={join}
             >
-              {busy ? 'Adding…' : 'Add group'}
+              {busy ? 'Joining…' : 'Join group'}
             </button>
-            <button className="button" onClick={() => setPreview(null)} disabled={busy}>
+            <button className="button" onClick={reset} disabled={busy}>
               Cancel
             </button>
           </div>

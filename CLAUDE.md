@@ -49,8 +49,12 @@ internal/oidc      relying party (web login) + bearer verification (MCP)
 internal/spliit    wrapper over go.chrastecky.dev/spliit-api
 internal/mcp       tool definitions and handlers
 internal/handlers  config JSON API, auth routes, SPA serving
-web/               Vite + React 18 SPA
+web/               Vite + React 18 SPA (react-router; pages/ + components/)
 ```
+
+The SPA has two routes: `/` lists the groups the MCP client can reach, and
+`/settings` is where anything that changes membership happens — identity,
+servers, joining, creating and removing groups.
 
 ### Dual database
 
@@ -83,12 +87,17 @@ and rounds — the upstream `amount.FromDecimal` demands an exponent of exactly
 
 ### "You"
 
-A user has one `display_name`; each group pins a `participant_id`. On add, the
-API suggests a participant only when exactly one name matches
-case-insensitively, otherwise the SPA makes the user pick. Spliit mints a fresh
-participant ID when one is removed and re-added, so a pinned ID can go stale —
-handlers detect this and return an error pointing at the config page rather than
-guessing.
+A user has one `display_name`; each group pins a `participant_id`.
+
+**Joining requires a participant** — `POST /api/groups` and the `join_group`
+tool both reject a request without one. A group registered without it would be
+readable but unwritable, and the failure would surface much later as a confusing
+tool error. On join, a participant is suggested only when exactly one name
+matches case-insensitively; otherwise the caller must choose.
+
+Spliit mints a fresh participant ID when one is removed and re-added, so a
+pinned ID can go stale. Handlers detect this and return an error naming the fix
+(`set_active_participant`, or the "Change you" button) rather than guessing.
 
 ### Tool errors
 
@@ -103,3 +112,6 @@ Spliit tRPC endpoint, with a stub verifier where **the bearer token is the
 subject** — so `env.connect(t, "alice")` is an authenticated session as `alice`.
 `fakeSpliit.results` maps a procedure name to its canned payload; note the
 responses are the tRPC-shaped ones (`groups.get` returns `{"group": {...}}`).
+
+`manage_test.go` covers the join/leave lifecycle, including that `leave_group`
+issues no upstream delete and that joining is scoped to the caller.

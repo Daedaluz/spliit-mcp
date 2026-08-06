@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useState } from 'react'
+import { NavLink, Route, Routes } from 'react-router-dom'
 import { api, Group, Me, Server, UnauthorizedError } from './api'
-import { IdentityCard } from './IdentityCard'
-import { ServerList } from './ServerList'
-import { GroupList } from './GroupList'
-import { AddGroup } from './AddGroup'
+import { GroupsPage } from './pages/GroupsPage'
+import { SettingsPage } from './pages/SettingsPage'
+
+/** Everything the pages read, reloaded together after any mutation. */
+export interface AppData {
+  me: Me
+  servers: Server[]
+  groups: Group[]
+  reload: () => Promise<void>
+  onError: (message: string | null) => void
+  setMe: (me: Me) => void
+}
 
 export function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -41,7 +50,11 @@ export function App() {
   }, [reload])
 
   if (loading) {
-    return <main className="page"><p className="muted">Loading…</p></main>
+    return (
+      <main className="page">
+        <p className="muted">Loading…</p>
+      </main>
+    )
   }
 
   if (signedOut || !me) {
@@ -51,10 +64,14 @@ export function App() {
         <p className="muted">
           Sign in to manage which Spliit groups are available to your MCP client.
         </p>
-        <a className="button primary" href="/auth/login">Sign in</a>
+        <a className="button primary" href="/auth/login">
+          Sign in
+        </a>
       </main>
     )
   }
+
+  const data: AppData = { me, servers, groups, reload, onError: setError, setMe }
 
   return (
     <main className="page">
@@ -74,15 +91,22 @@ export function App() {
         </div>
       </header>
 
+      <nav className="tabs">
+        <NavLink to="/" end className={({ isActive }) => (isActive ? 'tab active' : 'tab')}>
+          Groups
+        </NavLink>
+        <NavLink to="/settings" className={({ isActive }) => (isActive ? 'tab active' : 'tab')}>
+          Settings
+        </NavLink>
+      </nav>
+
       {error && <div className="banner error">{error}</div>}
 
-      <IdentityCard me={me} onChange={setMe} onError={setError} />
-
-      <ServerList servers={servers} groups={groups} onChanged={reload} onError={setError} />
-
-      <AddGroup servers={servers} onAdded={reload} onError={setError} />
-
-      <GroupList groups={groups} onChanged={reload} onError={setError} />
+      <Routes>
+        <Route path="/" element={<GroupsPage data={data} />} />
+        <Route path="/settings" element={<SettingsPage data={data} />} />
+        <Route path="*" element={<GroupsPage data={data} />} />
+      </Routes>
     </main>
   )
 }

@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go.chrastecky.dev/spliit-api/spliit/shape"
 
 	"github.com/daedaluz/spliit-mcp/internal/spliit"
 	"github.com/daedaluz/spliit-mcp/internal/store"
@@ -239,7 +241,7 @@ func (s *Server) PreviewGroup(c *gin.Context) {
 		return
 	}
 
-	body.GroupID = extractGroupID(strings.TrimSpace(body.GroupID))
+	body.GroupID = spliit.ExtractGroupID(strings.TrimSpace(body.GroupID))
 	if body.GroupID == "" {
 		writeError(c, http.StatusBadRequest, "group_id must not be empty")
 		return
@@ -312,10 +314,17 @@ func (s *Server) CreateGroup(c *gin.Context) {
 		return
 	}
 
-	body.GroupID = extractGroupID(strings.TrimSpace(body.GroupID))
+	body.GroupID = spliit.ExtractGroupID(strings.TrimSpace(body.GroupID))
 	body.Alias = strings.TrimSpace(body.Alias)
 	if body.GroupID == "" {
 		writeError(c, http.StatusBadRequest, "group_id must not be empty")
+		return
+	}
+	// Joining without knowing who you are leaves a group that every write tool
+	// would reject later, so require it up front rather than storing a stub.
+	if strings.TrimSpace(body.ParticipantID) == "" {
+		writeError(c, http.StatusBadRequest,
+			"participant_id is required: pick which participant is you in this group")
 		return
 	}
 
@@ -338,7 +347,7 @@ func (s *Server) CreateGroup(c *gin.Context) {
 	// The participant must really exist in this group, or every later tool call
 	// would fail with a confusing upstream error instead of a clear one here.
 	participant := spliit.FindParticipant(group, body.ParticipantID)
-	if body.ParticipantID != "" && participant == nil {
+	if participant == nil {
 		writeError(c, http.StatusBadRequest, "that participant does not exist in this group")
 		return
 	}
@@ -348,15 +357,14 @@ func (s *Server) CreateGroup(c *gin.Context) {
 	}
 
 	row := &store.Group{
-		UserSub:       user.Sub,
-		ServerID:      server.ID,
-		SpliitGroupID: group.ID,
-		Alias:         body.Alias,
-		GroupName:     group.Name,
-		Currency:      group.Currency,
-	}
-	if participant != nil {
-		row.ParticipantID, row.ParticipantName = participant.ID, participant.Name
+		UserSub:         user.Sub,
+		ServerID:        server.ID,
+		SpliitGroupID:   group.ID,
+		Alias:           body.Alias,
+		GroupName:       group.Name,
+		Currency:        group.Currency,
+		ParticipantID:   participant.ID,
+		ParticipantName: participant.Name,
 	}
 
 	created, err := s.store.CreateGroup(ctx, row)
@@ -369,6 +377,143 @@ func (s *Server) CreateGroup(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, created)
+}
+
+// CreateSpliitGroup creates a brand new group on a Spliit instance and joins it
+// in one step, with the caller as a participant.
+//
+// Creating and joining are deliberately not separable here: a group that exists
+// in Spliit but was never registered is unreachable through this server, and
+// Spliit offers no way to list groups to find it again.
+func (s *Server) CreateSpliitGroup(c *gin.Context) {
+	user := UserFromContext(c)
+	ctx := c.Request.Context()
+
+	var body struct {
+		ServerID string `json:"server_id"`
+		Name     string `json:"name"`
+		Currency string `json:"currency"`
+		Alias    string `json:"alias"`
+		// Participants excludes the caller, who is added automatically.
+		Participants []string `json:"participants"`
+		// YourName is the participant name to use for the caller, defaulting to
+		// their display name.
+		YourName string `json:"your_name"`
+	}
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" {
+		writeError(c, http.StatusBadRequest, "name must not be empty")
+		return
+	}
+
+	yourName := strings.TrimSpace(body.YourName)
+	if yourName == "" {
+		yourName = user.DisplayName
+	}
+	if yourName == "" {
+		writeError(c, http.StatusBadRequest,
+			"set your name first, or pass your_name")
+		return
+	}
+
+	server, err := s.store.GetServer(ctx, user.Sub, body.ServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "server not found")
+		return
+	}
+	if err != nil {
+		s.serverError(c, "load server", err)
+		return
+	}
+
+	form, err := buildGroupForm(body.Name, body.Currency, yourName, body.Participants)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	groupID, err := s.clients.CreateGroup(ctx, server.BaseURL, form)
+	if err != nil {
+		writeError(c, http.StatusBadGateway, "could not create the group: "+err.Error())
+		return
+	}
+
+	// Read it back for the participant IDs Spliit generated.
+	group, err := s.clients.GetGroup(ctx, server.BaseURL, groupID)
+	if err != nil {
+		writeError(c, http.StatusBadGateway,
+			"the group was created but could not be read back: "+err.Error())
+		return
+	}
+
+	alias := strings.TrimSpace(body.Alias)
+	if alias == "" {
+		alias = group.Name
+	}
+
+	row := &store.Group{
+		UserSub: user.Sub, ServerID: server.ID, SpliitGroupID: group.ID,
+		Alias: alias, GroupName: group.Name, Currency: group.Currency,
+	}
+	if p := spliit.FindParticipantByName(group, yourName); p != nil {
+		row.ParticipantID, row.ParticipantName = p.ID, p.Name
+	}
+
+	created, err := s.store.CreateGroup(ctx, row)
+	if errors.Is(err, store.ErrConflict) {
+		// The group exists upstream now, so surface its ID rather than losing it.
+		writeError(c, http.StatusConflict, fmt.Sprintf(
+			"the group was created (id %s) but that alias is already taken; "+
+				"join it manually with a different alias", group.ID))
+		return
+	}
+	if err != nil {
+		s.serverError(c, "register created group", err)
+		return
+	}
+	c.JSON(http.StatusCreated, created)
+}
+
+// buildGroupForm assembles a Spliit group form with the caller first.
+func buildGroupForm(name, currency, yourName string, others []string) (shape.ModifyGroupForm, error) {
+	participants := []shape.ModifyGroupParticipant{{Name: yourName}}
+	seen := map[string]bool{strings.ToLower(yourName): true}
+
+	for _, other := range others {
+		other = strings.TrimSpace(other)
+		if other == "" || seen[strings.ToLower(other)] {
+			continue
+		}
+		// Spliit rejects duplicate participant names outright, so drop them here
+		// rather than sending a request that is guaranteed to fail.
+		seen[strings.ToLower(other)] = true
+		participants = append(participants, shape.ModifyGroupParticipant{Name: other})
+	}
+
+	for _, p := range participants {
+		if len(p.Name) < 2 {
+			return shape.ModifyGroupForm{}, fmt.Errorf(
+				"participant name %q is too short; Spliit requires at least 2 characters", p.Name)
+		}
+	}
+	if len(name) < 2 {
+		return shape.ModifyGroupForm{}, errors.New(
+			"group name is too short; Spliit requires at least 2 characters")
+	}
+
+	if strings.TrimSpace(currency) == "" {
+		currency = "USD"
+	}
+	return shape.ModifyGroupForm{
+		Name:         name,
+		Currency:     strings.TrimSpace(currency),
+		Participants: participants,
+	}, nil
 }
 
 // UpdateGroup changes a group's alias or re-pins which participant is "you".
@@ -449,25 +594,4 @@ func (s *Server) DeleteGroup(c *gin.Context) {
 	default:
 		c.Status(http.StatusNoContent)
 	}
-}
-
-// extractGroupID accepts either a bare group ID or a full Spliit URL such as
-// https://spliit.app/groups/<id>/expenses, since pasting the browser URL is the
-// natural thing to do when adding a group.
-func extractGroupID(input string) string {
-	if !strings.Contains(input, "/") {
-		return input
-	}
-	parsed, err := url.Parse(input)
-	if err != nil {
-		return input
-	}
-
-	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-	for i, part := range parts {
-		if part == "groups" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-	}
-	return input
 }

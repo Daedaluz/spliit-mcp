@@ -1,18 +1,14 @@
 import { useState } from 'react'
-import { api, Group, Server } from './api'
-
-interface Props {
-  servers: Server[]
-  groups: Group[]
-  onChanged: () => void
-  onError: (message: string | null) => void
-}
+import { AppData } from '../App'
+import { api } from '../api'
 
 /**
  * Spliit instances this user can pull groups from — the public spliit.app plus
  * any self-hosted ones.
  */
-export function ServerList({ servers, groups, onChanged, onError }: Props) {
+export function ServerList({ data }: { data: AppData }) {
+  const { servers, groups, reload: onChanged, onError } = data
+
   const [name, setName] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [busy, setBusy] = useState(false)

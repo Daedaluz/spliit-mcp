@@ -1,18 +1,15 @@
 import { useState } from 'react'
-import { api, Me } from './api'
-
-interface Props {
-  me: Me
-  onChange: (me: Me) => void
-  onError: (message: string | null) => void
-}
+import { AppData } from '../App'
+import { api } from '../api'
 
 /**
  * The "who you are" half of the config page. This name is what gets matched
  * against a group's participants when you add one, so it is worth getting right
  * before adding groups.
  */
-export function IdentityCard({ me, onChange, onError }: Props) {
+export function IdentityCard({ data }: { data: AppData }) {
+  const { me, setMe, onError } = data
+
   const [name, setName] = useState(me.display_name)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -24,7 +21,7 @@ export function IdentityCard({ me, onChange, onError }: Props) {
     onError(null)
     try {
       const updated = await api.setDisplayName(name.trim())
-      onChange(updated)
+      setMe(updated)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {

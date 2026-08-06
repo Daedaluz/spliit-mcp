@@ -94,9 +94,39 @@ func (t *tools) register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "create_group",
 		Title: "Create a group",
-		Description: "Create a new Spliit group and register it so the other tools can use it. " +
+		Description: "Create a new Spliit group and join it so the other tools can use it. " +
 			"You are added as a participant automatically.",
 	}, t.createGroup)
+
+	// Group management. Spliit has no notion of membership, so "joining" means
+	// registering a group ID here so the other tools can reach it.
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "inspect_group",
+		Title: "Inspect a group before joining",
+		Description: "Look up a Spliit group by ID or URL without joining it, to see its " +
+			"participants. Use this before join_group to learn which name to pass as you.",
+	}, t.inspectGroup)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "join_group",
+		Title: "Join an existing group",
+		Description: "Make an existing Spliit group available to these tools. You must say which " +
+			"participant is you; call inspect_group first if you do not know the names.",
+	}, t.joinGroup)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "leave_group",
+		Title: "Remove a group",
+		Description: "Remove a group from the ones available to you. Nothing is deleted in " +
+			"Spliit and the group can be joined again with the same ID.",
+	}, t.leaveGroup)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "set_active_participant",
+		Title: "Set who you are in a group",
+		Description: "Change which participant represents you in a group. Use this if the " +
+			"participant was renamed or re-created in Spliit.",
+	}, t.setActiveParticipant)
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,4 +1170,235 @@ func (t *tools) pickServer(ctx context.Context, sub, name string) (*store.Server
 		}
 	}
 	return nil, fmt.Errorf("no Spliit server named %q is registered for you", name)
+}
+
+// ---------------------------------------------------------------------------
+// inspect_group
+
+type inspectGroupInput struct {
+	GroupID string `json:"group_id" jsonschema:"A Spliit group ID, or the full group URL"`
+	Server  string `json:"server,omitempty" jsonschema:"Name of the Spliit server to look on (defaults to your only one)"`
+}
+
+type inspectGroupOutput struct {
+	GroupID      string   `json:"group_id"`
+	Name         string   `json:"name"`
+	Currency     string   `json:"currency"`
+	Server       string   `json:"server"`
+	Participants []string `json:"participants"`
+	// AlreadyJoined reports whether this group is already available to you.
+	AlreadyJoined bool   `json:"already_joined"`
+	JoinedAs      string `json:"joined_as,omitempty"`
+	// SuggestedYou is the participant matching your name, when exactly one does.
+	SuggestedYou string `json:"suggested_you,omitempty"`
+}
+
+// inspectGroup reads a group without joining it, so the participant list is
+// known before join_group has to name one.
+func (t *tools) inspectGroup(ctx context.Context, req *mcp.CallToolRequest, in inspectGroupInput) (*mcp.CallToolResult, inspectGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[inspectGroupOutput](err)
+	}
+	user, err := t.deps.Store.GetUser(ctx, sub)
+	if err != nil {
+		return toolError[inspectGroupOutput](err)
+	}
+
+	server, err := t.pickServer(ctx, sub, in.Server)
+	if err != nil {
+		return toolError[inspectGroupOutput](err)
+	}
+
+	groupID := spliit.ExtractGroupID(strings.TrimSpace(in.GroupID))
+	if groupID == "" {
+		return toolError[inspectGroupOutput](fmt.Errorf("group_id is required"))
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, server.BaseURL, groupID)
+	if err != nil {
+		return toolError[inspectGroupOutput](err)
+	}
+
+	out := inspectGroupOutput{
+		GroupID: group.ID, Name: group.Name, Currency: group.Currency,
+		Server: server.Name, Participants: spliit.ParticipantNames(group),
+	}
+
+	// Surface an existing membership so the model does not try to join twice.
+	if existing, err := t.deps.Store.ResolveGroup(ctx, sub, group.ID); err == nil {
+		out.AlreadyJoined, out.JoinedAs = true, existing.ParticipantName
+	}
+
+	if p := spliit.FindParticipantByName(group, user.DisplayName); p != nil {
+		out.SuggestedYou = p.Name
+	}
+
+	summary := fmt.Sprintf("%s — participants: %s.",
+		group.Name, strings.Join(out.Participants, ", "))
+	if out.AlreadyJoined {
+		summary += " You have already joined this group."
+	}
+	return toolResult(summary, out)
+}
+
+// ---------------------------------------------------------------------------
+// join_group
+
+type joinGroupInput struct {
+	GroupID string `json:"group_id" jsonschema:"A Spliit group ID, or the full group URL"`
+	// You is required: a group joined without knowing which participant the
+	// caller is cannot be written to, so it is asked for up front.
+	You    string `json:"you" jsonschema:"Which participant in the group is you (use inspect_group to see the names)"`
+	Alias  string `json:"alias,omitempty" jsonschema:"Short alias for later tool calls (defaults to the group name)"`
+	Server string `json:"server,omitempty" jsonschema:"Name of the Spliit server hosting it (defaults to your only one)"`
+}
+
+type joinGroupOutput struct {
+	Alias         string `json:"alias"`
+	Name          string `json:"name"`
+	SpliitGroupID string `json:"spliit_group_id"`
+	Server        string `json:"server"`
+	YouAre        string `json:"you_are"`
+}
+
+func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in joinGroupInput) (*mcp.CallToolResult, joinGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[joinGroupOutput](err)
+	}
+
+	server, err := t.pickServer(ctx, sub, in.Server)
+	if err != nil {
+		return toolError[joinGroupOutput](err)
+	}
+
+	groupID := spliit.ExtractGroupID(strings.TrimSpace(in.GroupID))
+	if groupID == "" {
+		return toolError[joinGroupOutput](fmt.Errorf("group_id is required"))
+	}
+	if strings.TrimSpace(in.You) == "" {
+		return toolError[joinGroupOutput](fmt.Errorf(
+			"you is required: name which participant you are, or call inspect_group first to see the options"))
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, server.BaseURL, groupID)
+	if err != nil {
+		return toolError[joinGroupOutput](err)
+	}
+
+	participant := spliit.FindParticipantByName(group, in.You)
+	if participant == nil {
+		return toolError[joinGroupOutput](fmt.Errorf(
+			"no participant named %q in %q; participants are: %s",
+			in.You, group.Name, strings.Join(spliit.ParticipantNames(group), ", ")))
+	}
+
+	alias := strings.TrimSpace(in.Alias)
+	if alias == "" {
+		alias = group.Name
+	}
+
+	stored, err := t.deps.Store.CreateGroup(ctx, &store.Group{
+		UserSub: sub, ServerID: server.ID, SpliitGroupID: group.ID,
+		Alias: alias, GroupName: group.Name, Currency: group.Currency,
+		ParticipantID: participant.ID, ParticipantName: participant.Name,
+	})
+	if errors.Is(err, store.ErrConflict) {
+		return toolError[joinGroupOutput](fmt.Errorf(
+			"you have already joined that group, or the alias %q is taken", alias))
+	}
+	if err != nil {
+		return toolError[joinGroupOutput](err)
+	}
+
+	return toolResult(
+		fmt.Sprintf("Joined %q as %s. Use alias %q in other tools.",
+			group.Name, participant.Name, stored.Alias),
+		joinGroupOutput{
+			Alias: stored.Alias, Name: group.Name, SpliitGroupID: group.ID,
+			Server: server.Name, YouAre: participant.Name,
+		})
+}
+
+// ---------------------------------------------------------------------------
+// leave_group
+
+type leaveGroupInput struct {
+	groupArg
+}
+
+type leaveGroupOutput struct {
+	Left  bool   `json:"left"`
+	Alias string `json:"alias"`
+}
+
+// leaveGroup unlinks a group locally. Nothing is deleted in Spliit, and the
+// group can be joined again with the same ID.
+func (t *tools) leaveGroup(ctx context.Context, req *mcp.CallToolRequest, in leaveGroupInput) (*mcp.CallToolResult, leaveGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[leaveGroupOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[leaveGroupOutput](err)
+	}
+
+	if err := t.deps.Store.DeleteGroup(ctx, sub, r.group.ID); err != nil {
+		return toolError[leaveGroupOutput](err)
+	}
+	return toolResult(
+		fmt.Sprintf("Removed %q from your available groups. "+
+			"Nothing was deleted in Spliit; rejoin with group ID %s.",
+			r.group.Alias, r.group.SpliitGroupID),
+		leaveGroupOutput{Left: true, Alias: r.group.Alias})
+}
+
+// ---------------------------------------------------------------------------
+// set_active_participant
+
+type setActiveParticipantInput struct {
+	groupArg
+	You string `json:"you" jsonschema:"Which participant in the group is you"`
+}
+
+type setActiveParticipantOutput struct {
+	Alias  string `json:"alias"`
+	YouAre string `json:"you_are"`
+}
+
+// setActiveParticipant re-pins who "you" are in a group, which is the fix when
+// a participant was removed and re-added in Spliit and the stored ID went stale.
+func (t *tools) setActiveParticipant(ctx context.Context, req *mcp.CallToolRequest, in setActiveParticipantInput) (*mcp.CallToolResult, setActiveParticipantOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[setActiveParticipantOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[setActiveParticipantOutput](err)
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[setActiveParticipantOutput](err)
+	}
+
+	participant := spliit.FindParticipantByName(group, in.You)
+	if participant == nil {
+		return toolError[setActiveParticipantOutput](fmt.Errorf(
+			"no participant named %q in this group; participants are: %s",
+			in.You, strings.Join(spliit.ParticipantNames(group), ", ")))
+	}
+
+	r.group.ParticipantID, r.group.ParticipantName = participant.ID, participant.Name
+	r.group.GroupName, r.group.Currency = group.Name, group.Currency
+	if err := t.deps.Store.UpdateGroup(ctx, r.group); err != nil {
+		return toolError[setActiveParticipantOutput](err)
+	}
+
+	return toolResult(
+		fmt.Sprintf("You are now %s in %q.", participant.Name, r.group.Alias),
+		setActiveParticipantOutput{Alias: r.group.Alias, YouAre: participant.Name})
 }
