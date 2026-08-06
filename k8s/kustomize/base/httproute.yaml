@@ -1,0 +1,46 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: spliit-mcp
+  labels:
+    app.kubernetes.io/name: spliit-mcp
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: www
+      namespace: ingress
+      sectionName: https
+  hostnames:
+    - spliit-mcp.example.com
+  rules:
+    # The MCP endpoint and everything the Go backend owns go straight to it,
+    # bypassing nginx. One less hop for a streaming endpoint, and it keeps SSE
+    # away from proxy buffering entirely.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp
+        - path:
+            type: PathPrefix
+            value: /api
+        - path:
+            type: PathPrefix
+            value: /auth
+        - path:
+            type: PathPrefix
+            value: /.well-known
+        - path:
+            type: PathPrefix
+            value: /healthz
+      backendRefs:
+        - name: spliit-mcp
+          port: 8080
+    # Everything else is the SPA.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: spliit-mcp-frontend
+          port: 8080

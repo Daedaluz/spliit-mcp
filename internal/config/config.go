@@ -29,6 +29,7 @@ type Config struct {
 
 	OIDC   OIDCConfig
 	Spliit SpliitConfig
+	MCP    MCPConfig
 
 	// SessionTTL bounds how long a config-page login stays valid.
 	SessionTTL time.Duration
@@ -64,6 +65,18 @@ type OIDCConfig struct {
 	SkipAudienceCheck bool
 }
 
+// MCPConfig tunes the MCP endpoint itself.
+type MCPConfig struct {
+	// Stateless serves every request independently instead of tracking sessions
+	// in memory.
+	//
+	// It defaults to true because the session map lives in one process: behind
+	// more than one replica a client that connects to one pod and continues on
+	// another is told "session not found" and fails to reconnect. The tools here
+	// are plain request/response, so nothing needs the session.
+	Stateless bool
+}
+
 // SpliitConfig holds defaults for talking to Spliit instances.
 type SpliitConfig struct {
 	// DefaultURL is the tRPC base URL seeded as a user's first server row.
@@ -85,6 +98,8 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("oidc.scopes", []string{"openid", "profile", "email"})
 	v.SetDefault("oidc.skip_audience_check", false)
+
+	v.SetDefault("mcp.stateless", true)
 
 	v.SetDefault("spliit.default_url", DefaultSpliitURL)
 	v.SetDefault("spliit.default_name", "spliit.app")
@@ -115,7 +130,7 @@ func Load(path string) (*Config, error) {
 	for _, key := range []string{
 		"oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes",
 		"oidc.mcp_client_id", "oidc.required_scopes", "oidc.skip_audience_check",
-		"oidc.state_secret",
+		"oidc.state_secret", "mcp.stateless",
 		"spliit.default_url", "spliit.default_name", "spliit.timeout",
 		"session.ttl", "session.cookie_secure",
 	} {
@@ -138,6 +153,9 @@ func Load(path string) (*Config, error) {
 			StateSecret:       v.GetString("oidc.state_secret"),
 			RequiredScopes:    v.GetStringSlice("oidc.required_scopes"),
 			SkipAudienceCheck: v.GetBool("oidc.skip_audience_check"),
+		},
+		MCP: MCPConfig{
+			Stateless: v.GetBool("mcp.stateless"),
 		},
 		Spliit: SpliitConfig{
 			DefaultURL:  strings.TrimRight(v.GetString("spliit.default_url"), "/"),

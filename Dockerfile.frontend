@@ -12,7 +12,9 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM nginx:alpine
+# Unprivileged variant: runs as uid 101 and listens on a high port, so the
+# image works under a restricted Pod Security Standard without a root container.
+FROM nginxinc/nginx-unprivileged:alpine
 
 ARG VERSION=dev
 ARG REVISION=unknown
@@ -34,6 +36,6 @@ COPY --from=build /app/dist /usr/share/nginx/html
 COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
 
 # Both are substituted into the template by the base image's entrypoint.
-# API_UPSTREAM must be set at run time; the port defaults to 80.
-ENV NGINX_PORT=80
-EXPOSE 80
+# API_UPSTREAM must be set at run time.
+ENV NGINX_PORT=8080
+EXPOSE 8080

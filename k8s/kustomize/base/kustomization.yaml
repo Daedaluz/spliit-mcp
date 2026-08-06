@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - database.yaml
+  - deployment.yaml
+  - service.yaml
+  - httproute.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: spliit-mcp
+
+# Overlays set the values that cannot be guessed: the public URL, the OIDC
+# issuer and client, and which Spliit instance new users start with.
+configMapGenerator:
+  - name: spliit-mcp
+    literals:
+      - SPLIIT_MCP_LISTEN=:8080
+      - SPLIIT_MCP_WEB_DIR=

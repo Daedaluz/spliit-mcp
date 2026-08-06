@@ -160,9 +160,10 @@ func setup(t *testing.T) *testEnv {
 		Log:     slog.New(slog.DiscardHandler),
 	})
 
+	// Mirrors production: stateless, so tests exercise the same code path.
 	handler := mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return mcpServer },
-		&mcpsdk.StreamableHTTPOptions{},
+		&mcpsdk.StreamableHTTPOptions{Stateless: true},
 	)
 
 	// Stand in for the OIDC verifier: the bearer token *is* the subject.

@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spliit-mcp
+  labels:
+    app.kubernetes.io/name: spliit-mcp
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spliit-mcp
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spliit-mcp
+        app.kubernetes.io/component: backend
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: spliit-mcp
+          image: ghcr.io/daedaluz/spliit-mcp:latest
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: spliit-mcp
+          env:
+            # The OIDC client secret and the login state secret never live in
+            # git. See k8s/kustomize/README.md for creating this secret.
+            - name: SPLIIT_MCP_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: spliit-mcp-oidc
+                  key: client-secret
+            # Without a stable state secret each replica would generate its own
+            # cookie keys, and a login would fail whenever the callback landed on
+            # a different pod than the one that started it.
+            - name: SPLIIT_MCP_OIDC_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: spliit-mcp-oidc
+                  key: state-secret
+            # Assembled by CloudNativePG when it provisions the cluster.
+            - name: SPLIIT_MCP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: spliit-mcp-db-app
+                  key: uri
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spliit-mcp-frontend
+  labels:
+    app.kubernetes.io/name: spliit-mcp
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spliit-mcp
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spliit-mcp
+        app.kubernetes.io/component: frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: ghcr.io/daedaluz/spliit-mcp-frontend:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: API_UPSTREAM
+              value: http://spliit-mcp:8080
+            # Unprivileged nginx cannot bind 80.
+            - name: NGINX_PORT
+              value: "8080"
+          # The base image templates its config and writes caches at startup, so
+          # it needs a writable /var/cache and /etc/nginx/conf.d rather than a
+          # read-only root.
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/nginx
+            - name: run
+              mountPath: /var/run
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        - name: conf
+          emptyDir: {}

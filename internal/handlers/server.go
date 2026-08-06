@@ -101,6 +101,16 @@ func (s *Server) requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
 
+		// Failures on the MCP endpoint are otherwise invisible: the SDK writes
+		// its own responses and records nothing.
+		if status := c.Writer.Status(); status >= 400 {
+			s.log.Warn("request failed",
+				"method", c.Request.Method,
+				"path", c.Request.URL.Path,
+				"status", status,
+				"session", c.Request.Header.Get("Mcp-Session-Id"))
+		}
+
 		// Anything the handlers recorded via gin's error list is worth surfacing.
 		if len(c.Errors) > 0 {
 			s.log.Error("request failed",

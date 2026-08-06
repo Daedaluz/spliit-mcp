@@ -1,0 +1,22 @@
+# CloudNativePG provisions the database and publishes its connection details as
+# the secret spliit-mcp-db-app, whose `uri` key the backend reads directly.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: spliit-mcp-db
+  labels:
+    app.kubernetes.io/name: spliit-mcp
+spec:
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.1-system-trixie
+  storage:
+    size: 2Gi
+    storageClass: ceph-filesystem
+    resizeInUseVolumes: true
+  bootstrap:
+    initdb:
+      database: spliitmcp
+      owner: spliitmcp
+      encoding: UTF8
+      localeCollate: C
+      localeCType: C

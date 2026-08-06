@@ -2,6 +2,8 @@ package mcp_test
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -318,5 +320,75 @@ func TestGetServerInfoRequiresIdentity(t *testing.T) {
 
 	if resp.StatusCode != 401 {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+// Stateless mode is what makes more than one replica viable: the SDK's session
+// map is per process, so a client that connects to one instance and continues
+// on another is told "session not found". This checks a call succeeds with no
+// session ever being established.
+func TestStatelessRequestsNeedNoSession(t *testing.T) {
+	env := setup(t)
+	env.seedUserOnly(t, "alice", "Tobias")
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	req, err := http.NewRequest(http.MethodPost, env.url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 without an initialize handshake", resp.StatusCode)
+	}
+	// A stateless server must not hand out a session for the client to reuse.
+	if id := resp.Header.Get("Mcp-Session-Id"); id != "" {
+		t.Errorf("Mcp-Session-Id = %q, want none in stateless mode", id)
+	}
+
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(payload), "list_groups") {
+		t.Errorf("tools/list did not return the tools: %s", payload)
+	}
+}
+
+// An unknown session must not be fatal either: that 404 is exactly what a
+// client hitting a different replica used to see.
+func TestUnknownSessionIsToleratedWhenStateless(t *testing.T) {
+	env := setup(t)
+	env.seedUserOnly(t, "alice", "Tobias")
+
+	req, err := http.NewRequest(http.MethodPost, env.url,
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Session-Id", "a-session-from-another-replica")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatal("unknown session returned 404; stateless mode is not in effect")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }

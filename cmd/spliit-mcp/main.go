@@ -123,10 +123,14 @@ func runServe(ctx context.Context, configPath string) error {
 	// The MCP endpoint is an OAuth 2.0 protected resource: the bearer token is
 	// verified before the request ever reaches the MCP handler, and the
 	// resulting subject is what scopes every tool call.
+	// Stateless by default: the SDK's session map is per process, so a client
+	// that reconnects to a different replica than it started on would be told
+	// "session not found". See config.MCPConfig.Stateless.
 	mcpHandler := mcpsdk.NewStreamableHTTPHandler(
 		func(*http.Request) *mcpsdk.Server { return mcpServer },
-		&mcpsdk.StreamableHTTPOptions{},
+		&mcpsdk.StreamableHTTPOptions{Stateless: cfg.MCP.Stateless},
 	)
+	log.Info("mcp endpoint configured", "stateless", cfg.MCP.Stateless)
 	protected := auth.RequireBearerToken(provider.TokenVerifier(), &auth.RequireBearerTokenOptions{
 		ResourceMetadataURL: cfg.ResourceMetadataURL(),
 		Scopes:              cfg.OIDC.RequiredScopes,
