@@ -29,6 +29,13 @@ oidc:
   # Scopes required on MCP bearer tokens. Empty means any valid token is enough.
   required_scopes: []
 
+  # Protects the OAuth state and PKCE cookie during login. Any stable random
+  # string. Without it the keys are per-process, so logins in flight break on
+  # every restart and fail outright behind more than one replica — whichever
+  # instance handles the callback cannot read a cookie another one wrote.
+  #   openssl rand -hex 32
+  state_secret: ""
+
   # Only enable if your provider cannot bind an audience to access tokens. It
   # disables the check that a token was actually minted for this server.
   skip_audience_check: false

@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,8 +32,51 @@ func UserFromContext(c *gin.Context) *store.User {
 }
 
 // LoginHandler starts the authorization code + PKCE flow.
+//
+// It first bounces the browser to the canonical public URL when it arrived on a
+// different host. The login sets a cookie holding the OAuth state and PKCE
+// verifier, but the provider always returns to the redirect URI built from
+// public_url — so starting at, say, localhost while public_url names a LAN
+// address sets the cookie on one host and reads it on another. Cookies are
+// host-scoped, so it simply is not sent, and the callback fails with a bare
+// "named cookie not present" that says nothing about the real cause.
 func (s *Server) LoginHandler() http.HandlerFunc {
-	return rp.AuthURLHandler(appoidc.State, s.oidc.RelyingParty)
+	start := rp.AuthURLHandler(appoidc.State, s.oidc.RelyingParty)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		want := publicHost(s.cfg.PublicURL)
+		if got := hostnameOf(r.Host); want != "" && got != "" && got != want {
+			s.log.Info("redirecting login to the canonical host",
+				"got", got, "want", want)
+			http.Redirect(w, r, s.cfg.PublicURL+"/auth/login", http.StatusFound)
+			return
+		}
+		start(w, r)
+	}
+}
+
+// publicHost is the hostname of the configured public URL, without the port.
+func publicHost(publicURL string) string {
+	parsed, err := url.Parse(publicURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
+// hostnameOf strips any port from a Host header.
+//
+// The port is deliberately ignored. Proxies rewrite it — nginx's $host drops it
+// entirely — and cookies are not port-scoped anyway, so the hostname alone is
+// exactly what decides whether the state cookie comes back.
+func hostnameOf(host string) string {
+	if host == "" {
+		return ""
+	}
+	if stripped, _, err := net.SplitHostPort(host); err == nil {
+		return stripped
+	}
+	return host
 }
 
 // CallbackHandler completes the flow, upserts the user, and issues a session.
@@ -89,7 +134,24 @@ func (s *Server) CallbackHandler() http.HandlerFunc {
 		http.Redirect(w, r, "/", http.StatusFound)
 	}
 
-	return rp.CodeExchangeHandler(onSuccess, s.oidc.RelyingParty)
+	exchange := rp.CodeExchangeHandler(onSuccess, s.oidc.RelyingParty)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// The library's own error for a missing state cookie says nothing about
+		// why it is missing, and the usual cause is arriving here on a host other
+		// than the one that started the login.
+		if _, err := r.Cookie("state"); errors.Is(err, http.ErrNoCookie) {
+			host := publicHost(s.cfg.PublicURL)
+			s.log.Warn("callback without a login state cookie",
+				"host", r.Host, "public_host", host)
+			http.Error(w, "This login did not start here, or it expired.\n\n"+
+				"Start again at "+s.cfg.PublicURL+"/auth/login and use that same "+
+				"address throughout — the state cookie is tied to it.",
+				http.StatusBadRequest)
+			return
+		}
+		exchange(w, r)
+	}
 }
 
 // LogoutHandler ends the session and clears the cookie.

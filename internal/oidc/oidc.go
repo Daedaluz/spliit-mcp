@@ -13,9 +13,11 @@ package oidc
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -61,26 +63,22 @@ func New(ctx context.Context, cfg *appconfig.Config) (*Provider, error) {
 		return nil, fmt.Errorf("oidc discovery for %s: %w", cfg.OIDC.Issuer, err)
 	}
 
-	// The cookie handler secures the state and PKCE verifier across the
-	// redirect. Its keys are process-local, so logins in flight do not survive
-	// a restart — acceptable, since the user simply retries.
-	hashKey, err := randomBytes(32)
+	// The cookie handler secures the OAuth state and PKCE verifier across the
+	// redirect to the provider and back.
+	hashKey, encKey, err := stateCookieKeys(cfg.OIDC.StateSecret)
 	if err != nil {
 		return nil, err
 	}
-	encKey, err := randomBytes(32)
-	if err != nil {
-		return nil, err
+
+	opts := []httphelper.CookieHandlerOpt{
+		httphelper.WithMaxAge(int(stateCookieTTL.Seconds())),
 	}
-	cookieHandler := httphelper.NewCookieHandler(hashKey, encKey,
-		httphelper.WithMaxAge(int((10 * time.Minute).Seconds())),
-		httphelper.WithUnsecure(),
-	)
-	if cfg.SessionCookieSecure {
-		cookieHandler = httphelper.NewCookieHandler(hashKey, encKey,
-			httphelper.WithMaxAge(int((10 * time.Minute).Seconds())),
-		)
+	if !cfg.SessionCookieSecure {
+		// Plain HTTP: a Secure cookie would never be sent back, and the callback
+		// would fail with a missing state cookie.
+		opts = append(opts, httphelper.WithUnsecure())
 	}
+	cookieHandler := httphelper.NewCookieHandler(hashKey, encKey, opts...)
 
 	relyingParty, err := rp.NewRelyingPartyOIDC(ctx,
 		cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.ClientSecret,
@@ -118,6 +116,12 @@ func New(ctx context.Context, cfg *appconfig.Config) (*Provider, error) {
 			return nil, fmt.Errorf("build resource server: %w", err)
 		}
 		p.resourceServer = resourceServer
+	}
+
+	if cfg.OIDC.StateSecret == "" {
+		slog.Default().Warn("oidc.state_secret is unset: login state cookies use " +
+			"per-process keys, so logins in flight will break on restart and will " +
+			"fail entirely if this server runs more than one replica")
 	}
 
 	if p.verifier == nil && p.resourceServer == nil {
@@ -272,6 +276,35 @@ func pickDisplayName(candidates ...string) string {
 		}
 	}
 	return ""
+}
+
+// stateCookieTTL bounds how long a login may sit half-finished. Ten minutes is
+// tight for a flow that can involve consent screens and MFA, and expiry shows
+// up as a confusing "named cookie not present" at the callback.
+const stateCookieTTL = 30 * time.Minute
+
+// stateCookieKeys derives the signing and encryption keys for the state cookie.
+//
+// Derived from a configured secret when there is one, because random per-process
+// keys mean in-flight logins break on every restart and, worse, fail outright
+// behind more than one replica: whichever instance handles the callback cannot
+// decrypt a cookie another instance wrote. Random keys stay the default so the
+// server runs without configuration, and New logs a warning in that case.
+func stateCookieKeys(secret string) (hashKey, encKey []byte, err error) {
+	if secret == "" {
+		if hashKey, err = randomBytes(32); err != nil {
+			return nil, nil, err
+		}
+		if encKey, err = randomBytes(32); err != nil {
+			return nil, nil, err
+		}
+		return hashKey, encKey, nil
+	}
+
+	// Two independent keys from one secret, via distinct domain separators.
+	hash := sha256.Sum256([]byte("spliit-mcp/state-cookie/hash\x00" + secret))
+	enc := sha256.Sum256([]byte("spliit-mcp/state-cookie/enc\x00" + secret))
+	return hash[:], enc[:], nil
 }
 
 // State generates an unguessable OAuth state value.

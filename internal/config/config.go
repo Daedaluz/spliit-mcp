@@ -53,6 +53,11 @@ type OIDCConfig struct {
 	MCPClientID string
 	// RequiredScopes, if set, are required on MCP bearer tokens.
 	RequiredScopes []string
+	// StateSecret derives the keys protecting the OAuth state and PKCE cookie
+	// during login. Set it to any stable random string so logins survive a
+	// restart; it is required when running more than one replica, since each
+	// instance must be able to read a cookie another one wrote.
+	StateSecret string
 	// SkipAudienceCheck disables validating that a bearer token's `aud` names
 	// this server. Only for providers that cannot issue audience-bound tokens;
 	// it weakens token-replay protection, so it is off by default.
@@ -110,6 +115,7 @@ func Load(path string) (*Config, error) {
 	for _, key := range []string{
 		"oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes",
 		"oidc.mcp_client_id", "oidc.required_scopes", "oidc.skip_audience_check",
+		"oidc.state_secret",
 		"spliit.default_url", "spliit.default_name", "spliit.timeout",
 		"session.ttl", "session.cookie_secure",
 	} {
@@ -129,6 +135,7 @@ func Load(path string) (*Config, error) {
 			ClientSecret:      v.GetString("oidc.client_secret"),
 			Scopes:            v.GetStringSlice("oidc.scopes"),
 			MCPClientID:       v.GetString("oidc.mcp_client_id"),
+			StateSecret:       v.GetString("oidc.state_secret"),
 			RequiredScopes:    v.GetStringSlice("oidc.required_scopes"),
 			SkipAudienceCheck: v.GetBool("oidc.skip_audience_check"),
 		},
