@@ -9,6 +9,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -178,10 +179,17 @@ func toolError[Out any](err error) (*mcp.CallToolResult, Out, error) {
 	}, zero, nil
 }
 
-// toolResult pairs a structured output value with a short text rendering, since
-// not every client surfaces structured content.
+// toolResult pairs a structured output value with a short text rendering.
+//
+// The JSON is emitted as a second text block rather than left to the SDK, which
+// only serializes structured output into text when Content is empty. Setting a
+// summary would otherwise suppress it entirely, and a client that does not read
+// structuredContent would see "1 group(s) available" with no groups in it.
 func toolResult[Out any](summary string, out Out) (*mcp.CallToolResult, Out, error) {
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: summary}},
-	}, out, nil
+	content := []mcp.Content{&mcp.TextContent{Text: summary}}
+
+	if payload, err := json.Marshal(out); err == nil {
+		content = append(content, &mcp.TextContent{Text: string(payload)})
+	}
+	return &mcp.CallToolResult{Content: content}, out, nil
 }

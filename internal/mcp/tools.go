@@ -191,7 +191,21 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 			"You have no groups available yet. Join one with join_group, or add it in %s.",
 			t.atConfigPage()), out)
 	}
-	return toolResult(fmt.Sprintf("%d group(s) available.", len(out.Groups)), out)
+
+	// Name them: a bare count is useless to a client that shows only this line.
+	lines := make([]string, 0, len(out.Groups))
+	for _, g := range out.Groups {
+		line := fmt.Sprintf("%s — %s (%s, %s)", g.Alias, g.Name, g.Currency, g.Server)
+		if g.YouAre != "" {
+			line += ", you are " + g.YouAre
+		}
+		if g.NeedsSetup {
+			line += " — no participant set as you"
+		}
+		lines = append(lines, line)
+	}
+	return toolResult(fmt.Sprintf("%d group(s) available:\n%s",
+		len(out.Groups), strings.Join(lines, "\n")), out)
 }
 
 // ---------------------------------------------------------------------------

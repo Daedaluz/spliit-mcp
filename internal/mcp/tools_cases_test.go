@@ -304,3 +304,54 @@ func TestMissingBearerTokenIsRejected(t *testing.T) {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// The SDK only serializes structured output into text when Content is empty, so
+// setting a summary suppresses it. Every tool sets one, which is how list_groups
+// came back as "1 group(s) available" with no groups in it. Clients that read
+// only text content must still receive the data.
+func TestResultsCarryTheDataInTextContent(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "list_groups", map[string]any{})
+	if isErr {
+		t.Fatalf("list_groups errored: %s", text)
+	}
+
+	// The summary alone must name the group, not just count it.
+	for _, want := range []string{"trip", "Test Group", "Tobias"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("summary is missing %q: %s", want, text)
+		}
+	}
+
+	// And the machine-readable payload must be there too.
+	if !strings.Contains(text, `"alias":"trip"`) {
+		t.Errorf("text content carries no JSON payload: %s", text)
+	}
+	if !strings.Contains(text, `"spliit_group_id":"grp-1"`) {
+		t.Errorf("JSON payload is incomplete: %s", text)
+	}
+}
+
+// The same applies to every other tool, not just list_groups.
+func TestGetBalancesCarriesItsPayload(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.balances.list"] = map[string]any{
+		"balances": map[string]any{
+			"p-me": map[string]any{"paid": 30000, "paidFor": 20000, "total": 10000},
+		},
+		"reimbursements": []map[string]any{},
+	}
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "get_balances", map[string]any{"group": "trip"})
+	if isErr {
+		t.Fatalf("get_balances errored: %s", text)
+	}
+	if !strings.Contains(text, `"your_net":"100.00"`) {
+		t.Errorf("balances payload missing from text content: %s", text)
+	}
+}
