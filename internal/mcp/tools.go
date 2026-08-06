@@ -1,0 +1,1143 @@
+package mcp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/shopspring/decimal"
+	"go.chrastecky.dev/spliit-api/spliit/model"
+	"go.chrastecky.dev/spliit-api/spliit/shape"
+
+	"github.com/daedaluz/spliit-mcp/internal/spliit"
+	"github.com/daedaluz/spliit-mcp/internal/store"
+)
+
+// groupArg is embedded by every tool input that targets one group.
+type groupArg struct {
+	Group string `json:"group" jsonschema:"The group alias from list_groups"`
+}
+
+func (t *tools) register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "list_groups",
+		Title: "List available groups",
+		Description: "List the Spliit groups available to you, with the alias to use in other " +
+			"tools, which participant represents you, and which Spliit server hosts each one.",
+	}, t.listGroups)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_group",
+		Title:       "Get group details",
+		Description: "Get a group's participants, currency, and which participant represents you.",
+	}, t.getGroup)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_balances",
+		Title:       "Get balances",
+		Description: "Get who owes what in a group, framed relative to you, plus suggested settlements.",
+	}, t.getBalances)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_expenses",
+		Title:       "List expenses",
+		Description: "List a group's expenses, newest first, optionally filtered by a search term.",
+	}, t.listExpenses)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_expense",
+		Title:       "Get an expense",
+		Description: "Get one expense in full, including how it was split.",
+	}, t.getExpense)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "create_expense",
+		Title: "Record an expense",
+		Description: "Record a new expense. Defaults to you having paid, split evenly between " +
+			"all participants. Amounts are decimal numbers in the group's currency.",
+	}, t.createExpense)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "update_expense",
+		Title: "Update an expense",
+		Description: "Change an existing expense. Every field is replaced, so unspecified fields " +
+			"fall back to the current value.",
+	}, t.updateExpense)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "delete_expense",
+		Title:       "Delete an expense",
+		Description: "Permanently delete an expense from a group.",
+	}, t.deleteExpense)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_stats",
+		Title:       "Get spending totals",
+		Description: "Get total group spending and your own share.",
+	}, t.getStats)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_activities",
+		Title:       "List recent activity",
+		Description: "List a group's recent activity log entries.",
+	}, t.listActivities)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_categories",
+		Title:       "List expense categories",
+		Description: "List the expense categories available on a group's Spliit server, with the IDs create_expense accepts.",
+	}, t.listCategories)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "create_group",
+		Title: "Create a group",
+		Description: "Create a new Spliit group and register it so the other tools can use it. " +
+			"You are added as a participant automatically.",
+	}, t.createGroup)
+}
+
+// ---------------------------------------------------------------------------
+// list_groups
+
+type listGroupsInput struct{}
+
+type groupSummary struct {
+	Alias           string `json:"alias"`
+	Name            string `json:"name"`
+	Currency        string `json:"currency"`
+	Server          string `json:"server"`
+	YouAre          string `json:"you_are,omitempty"`
+	NeedsSetup      bool   `json:"needs_setup,omitempty"`
+	SpliitGroupID   string `json:"spliit_group_id"`
+	SetupHintForYou string `json:"setup_hint,omitempty"`
+}
+
+type listGroupsOutput struct {
+	Groups []groupSummary `json:"groups"`
+}
+
+func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ listGroupsInput) (*mcp.CallToolResult, listGroupsOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[listGroupsOutput](err)
+	}
+
+	groups, err := t.deps.Store.ListGroups(ctx, sub)
+	if err != nil {
+		return toolError[listGroupsOutput](err)
+	}
+	servers, err := t.deps.Store.ListServers(ctx, sub)
+	if err != nil {
+		return toolError[listGroupsOutput](err)
+	}
+
+	names := make(map[string]string, len(servers))
+	for _, srv := range servers {
+		names[srv.ID] = srv.Name
+	}
+
+	out := listGroupsOutput{Groups: make([]groupSummary, 0, len(groups))}
+	for _, g := range groups {
+		summary := groupSummary{
+			Alias:         g.Alias,
+			Name:          g.GroupName,
+			Currency:      g.Currency,
+			Server:        names[g.ServerID],
+			YouAre:        g.ParticipantName,
+			SpliitGroupID: g.SpliitGroupID,
+		}
+		if g.ParticipantID == "" {
+			summary.NeedsSetup = true
+			summary.SetupHintForYou = "no participant is pinned as you; set one in the config page"
+		}
+		out.Groups = append(out.Groups, summary)
+	}
+
+	if len(out.Groups) == 0 {
+		return toolResult("You have no groups available yet. Add one in the spliit-mcp config page.", out)
+	}
+	return toolResult(fmt.Sprintf("%d group(s) available.", len(out.Groups)), out)
+}
+
+// ---------------------------------------------------------------------------
+// get_group
+
+type getGroupInput struct {
+	groupArg
+}
+
+type participantInfo struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	IsYou  bool   `json:"is_you,omitempty"`
+	Active bool   `json:"has_expenses"`
+}
+
+type getGroupOutput struct {
+	Alias        string            `json:"alias"`
+	Name         string            `json:"name"`
+	Currency     string            `json:"currency"`
+	Server       string            `json:"server"`
+	YouAre       string            `json:"you_are,omitempty"`
+	Participants []participantInfo `json:"participants"`
+	Information  string            `json:"information,omitempty"`
+}
+
+func (t *tools) getGroup(ctx context.Context, req *mcp.CallToolRequest, in getGroupInput) (*mcp.CallToolResult, getGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[getGroupOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[getGroupOutput](err)
+	}
+
+	group, withExpenses, err := t.deps.Clients.GetGroupDetails(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[getGroupOutput](err)
+	}
+
+	active := make(map[string]bool, len(withExpenses))
+	for _, id := range withExpenses {
+		active[id] = true
+	}
+
+	out := getGroupOutput{
+		Alias:    r.group.Alias,
+		Name:     group.Name,
+		Currency: group.Currency,
+		Server:   r.server.Name,
+		YouAre:   r.group.ParticipantName,
+	}
+	if group.Information != nil {
+		out.Information = *group.Information
+	}
+	for _, p := range group.Participants {
+		if p == nil {
+			continue
+		}
+		out.Participants = append(out.Participants, participantInfo{
+			ID: p.ID, Name: p.Name,
+			IsYou:  p.ID == r.group.ParticipantID,
+			Active: active[p.ID],
+		})
+	}
+	return toolResult(fmt.Sprintf("%s — %d participants, currency %s.",
+		group.Name, len(out.Participants), group.Currency), out)
+}
+
+// ---------------------------------------------------------------------------
+// get_balances
+
+type getBalancesInput struct {
+	groupArg
+}
+
+type balanceEntry struct {
+	Participant string `json:"participant"`
+	IsYou       bool   `json:"is_you,omitempty"`
+	Paid        string `json:"paid"`
+	Share       string `json:"share"`
+	// Net is positive when this participant is owed money and negative when
+	// they owe it.
+	Net string `json:"net"`
+}
+
+type settlement struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Amount string `json:"amount"`
+}
+
+type getBalancesOutput struct {
+	Group       string         `json:"group"`
+	Currency    string         `json:"currency"`
+	YourNet     string         `json:"your_net,omitempty"`
+	YourSummary string         `json:"your_summary,omitempty"`
+	Balances    []balanceEntry `json:"balances"`
+	Settlements []settlement   `json:"suggested_settlements"`
+}
+
+func (t *tools) getBalances(ctx context.Context, req *mcp.CallToolRequest, in getBalancesInput) (*mcp.CallToolResult, getBalancesOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[getBalancesOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[getBalancesOutput](err)
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[getBalancesOutput](err)
+	}
+	balances, err := t.deps.Clients.ListBalances(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[getBalancesOutput](err)
+	}
+
+	// Spliit keys balances by participant ID; the model needs names.
+	names := make(map[string]string, len(group.Participants))
+	for _, p := range group.Participants {
+		if p != nil {
+			names[p.ID] = p.Name
+		}
+	}
+	nameOf := func(id string) string {
+		if n, ok := names[id]; ok {
+			return n
+		}
+		return id
+	}
+
+	out := getBalancesOutput{
+		Group: r.group.Alias, Currency: group.Currency,
+		Balances:    make([]balanceEntry, 0, len(balances.Balances)),
+		Settlements: make([]settlement, 0, len(balances.Reimbursements)),
+	}
+
+	for id, b := range balances.Balances {
+		entry := balanceEntry{
+			Participant: nameOf(id),
+			IsYou:       id == r.group.ParticipantID,
+			Paid:        b.Paid.AsDecimal().StringFixed(2),
+			Share:       b.PaidFor.AsDecimal().StringFixed(2),
+			Net:         b.Total.AsDecimal().StringFixed(2),
+		}
+		if entry.IsYou {
+			net := b.Total.AsDecimal()
+			out.YourNet = net.StringFixed(2)
+			switch {
+			case net.IsPositive():
+				out.YourSummary = fmt.Sprintf("You are owed %s %s overall.",
+					net.StringFixed(2), group.Currency)
+			case net.IsNegative():
+				out.YourSummary = fmt.Sprintf("You owe %s %s overall.",
+					net.Neg().StringFixed(2), group.Currency)
+			default:
+				out.YourSummary = "You are settled up."
+			}
+		}
+		out.Balances = append(out.Balances, entry)
+	}
+
+	for _, reimbursement := range balances.Reimbursements {
+		out.Settlements = append(out.Settlements, settlement{
+			From:   nameOf(reimbursement.From),
+			To:     nameOf(reimbursement.To),
+			Amount: reimbursement.Amount.AsDecimal().StringFixed(2),
+		})
+	}
+
+	summary := out.YourSummary
+	if summary == "" {
+		summary = fmt.Sprintf("Balances for %s.", r.group.Alias)
+	}
+	return toolResult(summary, out)
+}
+
+// ---------------------------------------------------------------------------
+// list_expenses
+
+type listExpensesInput struct {
+	groupArg
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum expenses to return (default 20, max 100)"`
+	Cursor int    `json:"cursor,omitempty" jsonschema:"Pagination cursor from a previous call"`
+	Filter string `json:"filter,omitempty" jsonschema:"Only return expenses whose title matches this text"`
+}
+
+type expenseSummary struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Date     string `json:"date"`
+	Amount   string `json:"amount"`
+	PaidBy   string `json:"paid_by"`
+	PaidByMe bool   `json:"paid_by_you,omitempty"`
+	Category string `json:"category,omitempty"`
+}
+
+type listExpensesOutput struct {
+	Group      string           `json:"group"`
+	Currency   string           `json:"currency"`
+	Expenses   []expenseSummary `json:"expenses"`
+	HasMore    bool             `json:"has_more"`
+	NextCursor int              `json:"next_cursor,omitempty"`
+}
+
+func (t *tools) listExpenses(ctx context.Context, req *mcp.CallToolRequest, in listExpensesInput) (*mcp.CallToolResult, listExpensesOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[listExpensesOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[listExpensesOutput](err)
+	}
+
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	var cursor *int
+	if in.Cursor > 0 {
+		cursor = &in.Cursor
+	}
+	var filter *string
+	if strings.TrimSpace(in.Filter) != "" {
+		filter = &in.Filter
+	}
+
+	page, err := t.deps.Clients.ListExpenses(ctx, r.baseURL(), r.spliitID(), &limit, cursor, filter)
+	if err != nil {
+		return toolError[listExpensesOutput](err)
+	}
+
+	out := listExpensesOutput{
+		Group: r.group.Alias, Currency: r.group.Currency,
+		Expenses: make([]expenseSummary, 0, len(page.Expenses)),
+		HasMore:  page.HasMore, NextCursor: page.NextCursor,
+	}
+	for i := range page.Expenses {
+		out.Expenses = append(out.Expenses, t.summarize(&page.Expenses[i], r.group.ParticipantID))
+	}
+	return toolResult(fmt.Sprintf("%d expense(s) in %s.", len(out.Expenses), r.group.Alias), out)
+}
+
+func (t *tools) summarize(e *model.Expense, meID string) expenseSummary {
+	summary := expenseSummary{
+		ID:     e.ID,
+		Title:  e.Title,
+		Date:   e.ExpenseDate.Format(time.DateOnly),
+		Amount: e.Amount.AsDecimal().StringFixed(2),
+	}
+	if e.PaidBy != nil {
+		summary.PaidBy = e.PaidBy.Name
+	}
+	summary.PaidByMe = meID != "" && e.PaidByID == meID
+	if e.Category != nil {
+		summary.Category = e.Category.Name
+	}
+	return summary
+}
+
+// ---------------------------------------------------------------------------
+// get_expense
+
+type getExpenseInput struct {
+	groupArg
+	ExpenseID string `json:"expense_id" jsonschema:"The expense ID from list_expenses"`
+}
+
+type expenseShare struct {
+	Participant string `json:"participant"`
+	IsYou       bool   `json:"is_you,omitempty"`
+	Shares      uint   `json:"shares"`
+}
+
+type getExpenseOutput struct {
+	expenseSummary
+	Group           string         `json:"group"`
+	Currency        string         `json:"currency"`
+	SplitMode       string         `json:"split_mode"`
+	PaidFor         []expenseShare `json:"paid_for"`
+	Notes           string         `json:"notes,omitempty"`
+	IsReimbursement bool           `json:"is_reimbursement,omitempty"`
+}
+
+func (t *tools) getExpense(ctx context.Context, req *mcp.CallToolRequest, in getExpenseInput) (*mcp.CallToolResult, getExpenseOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[getExpenseOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[getExpenseOutput](err)
+	}
+
+	expense, err := t.deps.Clients.GetExpense(ctx, r.baseURL(), r.spliitID(), in.ExpenseID)
+	if err != nil {
+		return toolError[getExpenseOutput](err)
+	}
+
+	out := getExpenseOutput{
+		expenseSummary:  t.summarize(expense, r.group.ParticipantID),
+		Group:           r.group.Alias,
+		Currency:        r.group.Currency,
+		SplitMode:       string(expense.SplitMode),
+		IsReimbursement: expense.IsReimbursement,
+	}
+	if expense.Notes != nil {
+		out.Notes = *expense.Notes
+	}
+	for _, pf := range expense.PaidFor {
+		if pf == nil {
+			continue
+		}
+		share := expenseShare{Shares: pf.Shares, IsYou: pf.ParticipantID == r.group.ParticipantID}
+		if pf.Participant != nil {
+			share.Participant = pf.Participant.Name
+		} else {
+			share.Participant = pf.ParticipantID
+		}
+		out.PaidFor = append(out.PaidFor, share)
+	}
+	return toolResult(fmt.Sprintf("%s — %s %s", expense.Title, out.Amount, r.group.Currency), out)
+}
+
+// ---------------------------------------------------------------------------
+// create_expense / update_expense
+
+type expenseWriteInput struct {
+	groupArg
+	Title string `json:"title" jsonschema:"What the expense was for"`
+	// Amount is a decimal string rather than a float so that money never passes
+	// through binary floating point.
+	Amount     string   `json:"amount" jsonschema:"Total amount as a decimal number in the group's currency, e.g. 12.50"`
+	Date       string   `json:"date,omitempty" jsonschema:"Date in YYYY-MM-DD form (defaults to today)"`
+	PaidBy     string   `json:"paid_by,omitempty" jsonschema:"Participant name who paid (defaults to you)"`
+	PaidFor    []string `json:"paid_for,omitempty" jsonschema:"Participant names sharing the cost (defaults to everyone)"`
+	CategoryID int      `json:"category_id,omitempty" jsonschema:"Category ID from list_categories"`
+	Notes      string   `json:"notes,omitempty" jsonschema:"Free-text notes"`
+	// IsReimbursement marks a payment settling an existing debt rather than a
+	// new shared cost.
+	IsReimbursement bool `json:"is_reimbursement,omitempty" jsonschema:"True if this is a repayment settling a debt"`
+}
+
+type createExpenseOutput struct {
+	ExpenseID string   `json:"expense_id"`
+	Group     string   `json:"group"`
+	Title     string   `json:"title"`
+	Amount    string   `json:"amount"`
+	PaidBy    string   `json:"paid_by"`
+	PaidFor   []string `json:"paid_for"`
+}
+
+func (t *tools) createExpense(ctx context.Context, req *mcp.CallToolRequest, in expenseWriteInput) (*mcp.CallToolResult, createExpenseOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	form, names, err := t.buildExpenseForm(in, group, r)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	me := participantOrNil(r.group.ParticipantID)
+	id, err := t.deps.Clients.CreateExpense(ctx, r.baseURL(), r.spliitID(), form, me)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	out := createExpenseOutput{
+		ExpenseID: id, Group: r.group.Alias, Title: form.Title,
+		Amount: form.Amount.AsDecimal().StringFixed(2),
+		PaidBy: names.paidBy, PaidFor: names.paidFor,
+	}
+	return toolResult(fmt.Sprintf("Recorded %q for %s %s, paid by %s, split between %s.",
+		form.Title, out.Amount, r.group.Currency, names.paidBy,
+		strings.Join(names.paidFor, ", ")), out)
+}
+
+// updateExpenseInput deliberately does not embed expenseWriteInput: every field
+// must be optional here, since an update names only what changes and the rest is
+// carried over from the current expense.
+type updateExpenseInput struct {
+	groupArg
+	ExpenseID string `json:"expense_id" jsonschema:"The expense ID to update"`
+
+	Title           string   `json:"title,omitempty" jsonschema:"New title (unchanged if omitted)"`
+	Amount          string   `json:"amount,omitempty" jsonschema:"New total as a decimal number (unchanged if omitted)"`
+	Date            string   `json:"date,omitempty" jsonschema:"New date in YYYY-MM-DD form (unchanged if omitted)"`
+	PaidBy          string   `json:"paid_by,omitempty" jsonschema:"New payer's participant name (unchanged if omitted)"`
+	PaidFor         []string `json:"paid_for,omitempty" jsonschema:"New sharers' participant names (unchanged if omitted)"`
+	CategoryID      int      `json:"category_id,omitempty" jsonschema:"New category ID (unchanged if omitted)"`
+	Notes           string   `json:"notes,omitempty" jsonschema:"New notes (unchanged if omitted)"`
+	IsReimbursement bool     `json:"is_reimbursement,omitempty" jsonschema:"True if this is a repayment settling a debt"`
+}
+
+// asWriteInput reshapes an update into the common form-building input.
+func (in updateExpenseInput) asWriteInput() expenseWriteInput {
+	return expenseWriteInput{
+		groupArg:        in.groupArg,
+		Title:           in.Title,
+		Amount:          in.Amount,
+		Date:            in.Date,
+		PaidBy:          in.PaidBy,
+		PaidFor:         in.PaidFor,
+		CategoryID:      in.CategoryID,
+		Notes:           in.Notes,
+		IsReimbursement: in.IsReimbursement,
+	}
+}
+
+func (t *tools) updateExpense(ctx context.Context, req *mcp.CallToolRequest, in updateExpenseInput) (*mcp.CallToolResult, createExpenseOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	group, err := t.deps.Clients.GetGroup(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	// Spliit replaces the whole expense on update, so start from the current
+	// values and let the caller override only what they named.
+	current, err := t.deps.Clients.GetExpense(ctx, r.baseURL(), r.spliitID(), in.ExpenseID)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+	write := in.asWriteInput()
+	applyExpenseDefaults(&write, current)
+
+	form, names, err := t.buildExpenseForm(write, group, r)
+	if err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	me := participantOrNil(r.group.ParticipantID)
+	if err := t.deps.Clients.UpdateExpense(ctx, r.baseURL(), r.spliitID(), in.ExpenseID, form, me); err != nil {
+		return toolError[createExpenseOutput](err)
+	}
+
+	out := createExpenseOutput{
+		ExpenseID: in.ExpenseID, Group: r.group.Alias, Title: form.Title,
+		Amount: form.Amount.AsDecimal().StringFixed(2),
+		PaidBy: names.paidBy, PaidFor: names.paidFor,
+	}
+	return toolResult(fmt.Sprintf("Updated %q to %s %s.",
+		form.Title, out.Amount, r.group.Currency), out)
+}
+
+// applyExpenseDefaults fills unset input fields from the existing expense, so a
+// partial update does not silently blank the rest of it.
+func applyExpenseDefaults(in *expenseWriteInput, current *model.Expense) {
+	if in.Title == "" {
+		in.Title = current.Title
+	}
+	if in.Amount == "" {
+		in.Amount = current.Amount.AsDecimal().StringFixed(2)
+	}
+	if in.Date == "" {
+		in.Date = current.ExpenseDate.Format(time.DateOnly)
+	}
+	if in.PaidBy == "" && current.PaidBy != nil {
+		in.PaidBy = current.PaidBy.Name
+	}
+	if len(in.PaidFor) == 0 {
+		for _, pf := range current.PaidFor {
+			if pf != nil && pf.Participant != nil {
+				in.PaidFor = append(in.PaidFor, pf.Participant.Name)
+			}
+		}
+	}
+	if in.CategoryID == 0 {
+		in.CategoryID = current.CategoryID
+	}
+	if in.Notes == "" && current.Notes != nil {
+		in.Notes = *current.Notes
+	}
+}
+
+// resolvedNames records the human-readable participants an expense ended up
+// referring to, for the confirmation message.
+type resolvedNames struct {
+	paidBy  string
+	paidFor []string
+}
+
+// buildExpenseForm turns tool input into a Spliit expense form, resolving
+// participant names to IDs and defaulting the payer to the caller.
+func (t *tools) buildExpenseForm(in expenseWriteInput, group *model.Group, r resolved) (shape.ModifyExpenseForm, resolvedNames, error) {
+	var names resolvedNames
+
+	amount, err := decimal.NewFromString(strings.TrimSpace(in.Amount))
+	if err != nil {
+		return shape.ModifyExpenseForm{}, names,
+			fmt.Errorf("amount %q is not a decimal number", in.Amount)
+	}
+	if amount.IsZero() {
+		return shape.ModifyExpenseForm{}, names, fmt.Errorf("amount must not be zero")
+	}
+
+	if strings.TrimSpace(in.Title) == "" {
+		return shape.ModifyExpenseForm{}, names, fmt.Errorf("title is required")
+	}
+
+	date := time.Now().UTC().Truncate(24 * time.Hour)
+	if in.Date != "" {
+		parsed, err := time.Parse(time.DateOnly, strings.TrimSpace(in.Date))
+		if err != nil {
+			return shape.ModifyExpenseForm{}, names,
+				fmt.Errorf("date %q is not in YYYY-MM-DD form", in.Date)
+		}
+		date = parsed
+	}
+
+	// Who paid: an explicit name, otherwise the participant pinned as "you".
+	var payerID string
+	if strings.TrimSpace(in.PaidBy) != "" {
+		p, err := findByName(group, in.PaidBy)
+		if err != nil {
+			return shape.ModifyExpenseForm{}, names, err
+		}
+		payerID, names.paidBy = p.ID, p.Name
+	} else {
+		payerID, err = r.me()
+		if err != nil {
+			return shape.ModifyExpenseForm{}, names, err
+		}
+		if p := spliit.FindParticipant(group, payerID); p != nil {
+			names.paidBy = p.Name
+		} else {
+			// The pinned participant was removed in Spliit since it was set.
+			return shape.ModifyExpenseForm{}, names, fmt.Errorf(
+				"%w: re-pick it in the config page", spliit.ErrParticipantMissing)
+		}
+	}
+
+	// Who shares it: named participants, otherwise everyone.
+	paidFor := make([]shape.ModifyExpenseFormPaidFor, 0, len(group.Participants))
+	if len(in.PaidFor) > 0 {
+		for _, name := range in.PaidFor {
+			p, err := findByName(group, name)
+			if err != nil {
+				return shape.ModifyExpenseForm{}, names, err
+			}
+			paidFor = append(paidFor, shape.ModifyExpenseFormPaidFor{Participant: p.ID, Shares: 1})
+			names.paidFor = append(names.paidFor, p.Name)
+		}
+	} else {
+		for _, p := range group.Participants {
+			if p == nil {
+				continue
+			}
+			paidFor = append(paidFor, shape.ModifyExpenseFormPaidFor{Participant: p.ID, Shares: 1})
+			names.paidFor = append(names.paidFor, p.Name)
+		}
+	}
+	if len(paidFor) == 0 {
+		return shape.ModifyExpenseForm{}, names, fmt.Errorf("an expense must be shared by at least one participant")
+	}
+
+	form := shape.ModifyExpenseForm{
+		ExpenseDate:     date,
+		Title:           strings.TrimSpace(in.Title),
+		CategoryID:      in.CategoryID,
+		Amount:          spliit.ToAmount(amount),
+		PaidBy:          payerID,
+		PaidFor:         paidFor,
+		SplitMode:       model.SplitModeEvenly,
+		IsReimbursement: in.IsReimbursement,
+		RecurrenceRule:  model.RecurrenceRuleNone,
+	}
+	if strings.TrimSpace(in.Notes) != "" {
+		notes := in.Notes
+		form.Notes = &notes
+	}
+	return form, names, nil
+}
+
+// findByName resolves a participant by name, case-insensitively. An unknown
+// name is reported with the valid options so the model can retry immediately.
+func findByName(group *model.Group, name string) (*model.Participant, error) {
+	want := strings.TrimSpace(name)
+	for _, p := range group.Participants {
+		if p != nil && strings.EqualFold(strings.TrimSpace(p.Name), want) {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("no participant named %q in this group; participants are: %s",
+		name, strings.Join(spliit.ParticipantNames(group), ", "))
+}
+
+func participantOrNil(id string) *string {
+	if id == "" {
+		return nil
+	}
+	return &id
+}
+
+// ---------------------------------------------------------------------------
+// delete_expense
+
+type deleteExpenseInput struct {
+	groupArg
+	ExpenseID string `json:"expense_id" jsonschema:"The expense ID to delete"`
+}
+
+type deleteExpenseOutput struct {
+	Deleted   bool   `json:"deleted"`
+	ExpenseID string `json:"expense_id"`
+}
+
+func (t *tools) deleteExpense(ctx context.Context, req *mcp.CallToolRequest, in deleteExpenseInput) (*mcp.CallToolResult, deleteExpenseOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[deleteExpenseOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[deleteExpenseOutput](err)
+	}
+
+	// Read it first so the confirmation can name what was removed; a bare
+	// "deleted" gives the user nothing to check against.
+	expense, err := t.deps.Clients.GetExpense(ctx, r.baseURL(), r.spliitID(), in.ExpenseID)
+	if err != nil {
+		return toolError[deleteExpenseOutput](err)
+	}
+
+	me := participantOrNil(r.group.ParticipantID)
+	if err := t.deps.Clients.DeleteExpense(ctx, r.baseURL(), r.spliitID(), in.ExpenseID, me); err != nil {
+		return toolError[deleteExpenseOutput](err)
+	}
+	return toolResult(
+		fmt.Sprintf("Deleted %q (%s %s) from %s.",
+			expense.Title, expense.Amount.AsDecimal().StringFixed(2),
+			r.group.Currency, r.group.Alias),
+		deleteExpenseOutput{Deleted: true, ExpenseID: in.ExpenseID})
+}
+
+// ---------------------------------------------------------------------------
+// get_stats
+
+type getStatsInput struct {
+	groupArg
+}
+
+type getStatsOutput struct {
+	Group      string `json:"group"`
+	Currency   string `json:"currency"`
+	GroupTotal string `json:"group_total"`
+	YourTotal  string `json:"your_total,omitempty"`
+	YourShare  string `json:"your_share,omitempty"`
+}
+
+func (t *tools) getStats(ctx context.Context, req *mcp.CallToolRequest, in getStatsInput) (*mcp.CallToolResult, getStatsOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[getStatsOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[getStatsOutput](err)
+	}
+
+	stats, err := t.deps.Clients.GetStats(ctx, r.baseURL(), r.spliitID(),
+		participantOrNil(r.group.ParticipantID))
+	if err != nil {
+		return toolError[getStatsOutput](err)
+	}
+
+	out := getStatsOutput{
+		Group: r.group.Alias, Currency: r.group.Currency,
+		GroupTotal: stats.TotalGroupSpendings.AsDecimal().StringFixed(2),
+	}
+	if stats.TotalParticipantSpendings != nil {
+		out.YourTotal = stats.TotalParticipantSpendings.AsDecimal().StringFixed(2)
+	}
+	if stats.TotalParticipantShare != nil {
+		out.YourShare = stats.TotalParticipantShare.StringFixed(2)
+	}
+	return toolResult(fmt.Sprintf("%s has spent %s %s in total.",
+		r.group.Alias, out.GroupTotal, r.group.Currency), out)
+}
+
+// ---------------------------------------------------------------------------
+// list_activities
+
+type listActivitiesInput struct {
+	groupArg
+	Limit uint `json:"limit,omitempty" jsonschema:"Maximum entries to return (default 20, max 100)"`
+}
+
+type activityEntry struct {
+	Type         string `json:"type"`
+	At           string `json:"at"`
+	Participant  string `json:"participant,omitempty"`
+	ExpenseID    string `json:"expense_id,omitempty"`
+	ExpenseTitle string `json:"expense_title,omitempty"`
+}
+
+type listActivitiesOutput struct {
+	Group      string          `json:"group"`
+	Activities []activityEntry `json:"activities"`
+	HasMore    bool            `json:"has_more"`
+}
+
+func (t *tools) listActivities(ctx context.Context, req *mcp.CallToolRequest, in listActivitiesInput) (*mcp.CallToolResult, listActivitiesOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[listActivitiesOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[listActivitiesOutput](err)
+	}
+
+	limit := in.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	page, err := t.deps.Clients.ListActivities(ctx, r.baseURL(), r.spliitID(), &limit, nil)
+	if err != nil {
+		return toolError[listActivitiesOutput](err)
+	}
+
+	out := listActivitiesOutput{
+		Group: r.group.Alias, HasMore: page.HasMore,
+		Activities: make([]activityEntry, 0, len(page.Activities)),
+	}
+	for _, a := range page.Activities {
+		entry := activityEntry{
+			Type: string(a.ActivityType),
+			At:   a.Time.Format(time.RFC3339),
+		}
+		if a.ExpenseID != nil {
+			entry.ExpenseID = *a.ExpenseID
+		}
+		if a.Data != nil {
+			entry.ExpenseTitle = *a.Data
+		}
+		if a.ParticipantID != nil {
+			entry.Participant = *a.ParticipantID
+		}
+		out.Activities = append(out.Activities, entry)
+	}
+	return toolResult(fmt.Sprintf("%d activity entries for %s.", len(out.Activities), r.group.Alias), out)
+}
+
+// ---------------------------------------------------------------------------
+// list_categories
+
+type listCategoriesInput struct {
+	groupArg
+}
+
+type categoryEntry struct {
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	Grouping string `json:"grouping,omitempty"`
+}
+
+type listCategoriesOutput struct {
+	Categories []categoryEntry `json:"categories"`
+}
+
+func (t *tools) listCategories(ctx context.Context, req *mcp.CallToolRequest, in listCategoriesInput) (*mcp.CallToolResult, listCategoriesOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[listCategoriesOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[listCategoriesOutput](err)
+	}
+
+	categories, err := t.deps.Clients.ListCategories(ctx, r.baseURL())
+	if err != nil {
+		return toolError[listCategoriesOutput](err)
+	}
+
+	out := listCategoriesOutput{Categories: make([]categoryEntry, 0, len(categories))}
+	for _, c := range categories {
+		out.Categories = append(out.Categories, categoryEntry{
+			ID: c.ID, Name: c.Name, Grouping: c.Grouping,
+		})
+	}
+	return toolResult(fmt.Sprintf("%d categories.", len(out.Categories)), out)
+}
+
+// ---------------------------------------------------------------------------
+// create_group
+
+type createGroupInput struct {
+	Name string `json:"name" jsonschema:"Name of the new group"`
+	// Participants excludes you; you are added automatically.
+	Participants []string `json:"participants" jsonschema:"Names of the other participants; you are added automatically"`
+	Currency     string   `json:"currency,omitempty" jsonschema:"Currency symbol or code, e.g. SEK (default USD)"`
+	Alias        string   `json:"alias,omitempty" jsonschema:"Short alias for later tool calls (defaults to the group name)"`
+	Server       string   `json:"server,omitempty" jsonschema:"Name of the Spliit server to create it on (defaults to your only one)"`
+}
+
+type createGroupOutput struct {
+	Alias         string   `json:"alias"`
+	Name          string   `json:"name"`
+	SpliitGroupID string   `json:"spliit_group_id"`
+	Server        string   `json:"server"`
+	YouAre        string   `json:"you_are"`
+	Participants  []string `json:"participants"`
+}
+
+func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in createGroupInput) (*mcp.CallToolResult, createGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[createGroupOutput](err)
+	}
+
+	user, err := t.deps.Store.GetUser(ctx, sub)
+	if err != nil {
+		return toolError[createGroupOutput](err)
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return toolError[createGroupOutput](fmt.Errorf("name is required"))
+	}
+
+	server, err := t.pickServer(ctx, sub, in.Server)
+	if err != nil {
+		return toolError[createGroupOutput](err)
+	}
+
+	// The caller is always a participant; that is what makes the group usable
+	// through the other tools without a trip to the config page.
+	participants := []shape.ModifyGroupParticipant{{Name: user.DisplayName}}
+	added := []string{user.DisplayName}
+	for _, name := range in.Participants {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.EqualFold(name, user.DisplayName) {
+			continue
+		}
+		participants = append(participants, shape.ModifyGroupParticipant{Name: name})
+		added = append(added, name)
+	}
+
+	currency := strings.TrimSpace(in.Currency)
+	if currency == "" {
+		currency = "USD"
+	}
+
+	groupID, err := t.deps.Clients.CreateGroup(ctx, server.BaseURL, shape.ModifyGroupForm{
+		Name:         strings.TrimSpace(in.Name),
+		Currency:     currency,
+		Participants: participants,
+	})
+	if err != nil {
+		return toolError[createGroupOutput](err)
+	}
+
+	// Read it back to learn the generated participant IDs.
+	group, err := t.deps.Clients.GetGroup(ctx, server.BaseURL, groupID)
+	if err != nil {
+		return toolError[createGroupOutput](err)
+	}
+
+	alias := strings.TrimSpace(in.Alias)
+	if alias == "" {
+		alias = group.Name
+	}
+
+	stored, err := t.registerGroup(ctx, sub, server.ID, group, alias, user.DisplayName)
+	if err != nil {
+		return toolError[createGroupOutput](err)
+	}
+
+	out := createGroupOutput{
+		Alias: stored.Alias, Name: group.Name, SpliitGroupID: group.ID,
+		Server: server.Name, YouAre: stored.ParticipantName,
+		Participants: spliit.ParticipantNames(group),
+	}
+	return toolResult(fmt.Sprintf("Created %q on %s with %s. Use alias %q in other tools.",
+		group.Name, server.Name, strings.Join(added, ", "), stored.Alias), out)
+}
+
+// registerGroup stores a freshly created group against the caller, pinning the
+// participant whose name matches their display name.
+//
+// If the alias is taken, a numeric suffix is tried rather than failing: the
+// group already exists in Spliit at this point, and refusing to record it would
+// strand a group ID the user has no other way to recover.
+func (t *tools) registerGroup(
+	ctx context.Context, sub, serverID string,
+	group *model.Group, alias, displayName string,
+) (*store.Group, error) {
+	row := &store.Group{
+		UserSub:       sub,
+		ServerID:      serverID,
+		SpliitGroupID: group.ID,
+		Alias:         alias,
+		GroupName:     group.Name,
+		Currency:      group.Currency,
+	}
+	for _, p := range group.Participants {
+		if p != nil && strings.EqualFold(strings.TrimSpace(p.Name), strings.TrimSpace(displayName)) {
+			row.ParticipantID, row.ParticipantName = p.ID, p.Name
+			break
+		}
+	}
+
+	for attempt := 0; attempt < 10; attempt++ {
+		candidate := *row
+		if attempt > 0 {
+			candidate.Alias = fmt.Sprintf("%s-%d", alias, attempt+1)
+		}
+		stored, err := t.deps.Store.CreateGroup(ctx, &candidate)
+		if err == nil {
+			return stored, nil
+		}
+		if !errors.Is(err, store.ErrConflict) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf(
+		"created group %q (id %s) but could not register an alias for it; add it manually in the config page",
+		group.Name, group.ID)
+}
+
+// pickServer resolves a server by name, or returns the only one when the user
+// has just one registered.
+func (t *tools) pickServer(ctx context.Context, sub, name string) (*store.Server, error) {
+	servers, err := t.deps.Store.ListServers(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("you have no Spliit servers registered; add one in the config page")
+	}
+
+	if strings.TrimSpace(name) == "" {
+		if len(servers) == 1 {
+			return &servers[0], nil
+		}
+		available := make([]string, 0, len(servers))
+		for _, s := range servers {
+			available = append(available, s.Name)
+		}
+		return nil, fmt.Errorf("you have several Spliit servers; pass server as one of: %s",
+			strings.Join(available, ", "))
+	}
+
+	for i := range servers {
+		if strings.EqualFold(servers[i].Name, name) {
+			return &servers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no Spliit server named %q is registered for you", name)
+}

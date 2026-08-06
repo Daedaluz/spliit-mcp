@@ -1,0 +1,5 @@
+# Consumes a pre-built web/dist; run `npm --prefix web run build` first.
+FROM nginx:alpine
+COPY web/dist /usr/share/nginx/html
+COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
+EXPOSE 80

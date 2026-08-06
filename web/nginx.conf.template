@@ -1,0 +1,27 @@
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA routes resolve on a hard refresh.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Everything the Go backend owns. The MCP endpoint streams, so buffering is
+    # off and the read timeout is generous.
+    location ~ ^/(api|auth|healthz|\.well-known) {
+        proxy_pass ${API_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /mcp {
+        proxy_pass ${API_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}

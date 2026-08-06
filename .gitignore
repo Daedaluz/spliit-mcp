@@ -1,0 +1,8 @@
+/spliit-mcp
+*.db
+*.db-shm
+*.db-wal
+.env
+config.yaml
+web/node_modules/
+web/dist/

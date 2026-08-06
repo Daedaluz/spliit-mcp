@@ -1,0 +1,43 @@
+# spliit-mcp configuration.
+# Every key can also be set as an environment variable with the SPLIIT_MCP_
+# prefix and dots replaced by underscores, e.g. SPLIIT_MCP_OIDC_CLIENT_SECRET.
+
+listen: ":8080"
+
+# Must match the URL clients actually dial: it builds the OIDC redirect URI and
+# the OAuth resource identifier that MCP bearer tokens are audience-checked
+# against.
+public_url: "https://spliit-mcp.example.com"
+
+# Serve the built SPA from the Go binary. Leave empty when nginx serves web/dist.
+web_dir: "web/dist"
+
+# A postgres:// URL uses PostgreSQL; anything else is a SQLite file path.
+database_url: "spliit-mcp.db"
+# database_url: "postgres://user:pass@localhost:5432/spliitmcp?sslmode=disable"
+
+oidc:
+  issuer: "https://id.example.com"
+  client_id: "spliit-mcp"
+  client_secret: "change-me"
+  scopes: ["openid", "profile", "email"]
+
+  # For MCP clients whose authorization server does not support Dynamic Client
+  # Registration, pre-register a client and put its ID here.
+  mcp_client_id: ""
+
+  # Scopes required on MCP bearer tokens. Empty means any valid token is enough.
+  required_scopes: []
+
+  # Only enable if your provider cannot bind an audience to access tokens. It
+  # disables the check that a token was actually minted for this server.
+  skip_audience_check: false
+
+spliit:
+  # Seeded as each new user's first server; they can add more in the config page.
+  default_url: "https://spliit.app/api/trpc"
+  default_name: "spliit.app"
+  timeout: "30s"
+
+session:
+  ttl: "720h"

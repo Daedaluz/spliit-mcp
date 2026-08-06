@@ -1,0 +1,137 @@
+// Package mcp exposes a user's Spliit groups as MCP tools.
+//
+// Every tool resolves its `group` argument against the calling user's own rows
+// (see store.ResolveGroup). That scoping is the authorization boundary: Spliit
+// itself will happily serve any group ID to anyone, so a group the user has not
+// registered in the config page must be unreachable through this server, even
+// if the model supplies a valid ID from somewhere else.
+package mcp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/daedaluz/spliit-mcp/internal/config"
+	"github.com/daedaluz/spliit-mcp/internal/spliit"
+	"github.com/daedaluz/spliit-mcp/internal/store"
+)
+
+// Version is reported to MCP clients during initialization.
+const Version = "0.1.0"
+
+// Deps are the collaborators the tool handlers need.
+type Deps struct {
+	Config  *config.Config
+	Store   *store.Store
+	Clients *spliit.Clients
+	Log     *slog.Logger
+}
+
+// resolved is a group plus everything needed to call Spliit for it.
+type resolved struct {
+	group  *store.Group
+	server *store.Server
+}
+
+// baseURL is the tRPC endpoint of the instance hosting this group.
+func (r resolved) baseURL() string { return r.server.BaseURL }
+
+// spliitID is the group's ID within that instance.
+func (r resolved) spliitID() string { return r.group.SpliitGroupID }
+
+// errNoIdentity is returned when a group has no participant pinned as "you".
+var errNoIdentity = errors.New("no participant is pinned as you for this group")
+
+// me returns the participant ID representing the caller in this group.
+func (r resolved) me() (string, error) {
+	if r.group.ParticipantID == "" {
+		return "", fmt.Errorf("%w: set it in the spliit-mcp config page", errNoIdentity)
+	}
+	return r.group.ParticipantID, nil
+}
+
+// NewServer builds the MCP server and registers every tool.
+func NewServer(deps Deps) *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    "spliit-mcp",
+		Title:   "Spliit",
+		Version: Version,
+		Description: "Read and record shared expenses in Spliit groups. " +
+			"Groups are made available through the spliit-mcp config page.",
+	}, &mcp.ServerOptions{
+		Instructions: "Each tool takes a `group`, which is the alias shown by list_groups. " +
+			"Only groups the signed-in user has registered are reachable. " +
+			"Amounts are in the group's currency as decimal numbers, e.g. 12.50. " +
+			"When the user says \"I paid\" or \"my share\", that refers to the participant " +
+			"pinned as them in that group; leave paid_by empty to default to it.",
+	})
+
+	t := &tools{deps: deps}
+	t.register(server)
+	return server
+}
+
+type tools struct {
+	deps Deps
+}
+
+// userFromRequest extracts the authenticated OIDC subject from the verified
+// bearer token attached to the MCP request.
+func (t *tools) userFromRequest(req *mcp.CallToolRequest) (string, error) {
+	if req.Extra == nil || req.Extra.TokenInfo == nil {
+		return "", errors.New("this request carries no verified identity")
+	}
+	sub := req.Extra.TokenInfo.UserID
+	if sub == "" {
+		return "", errors.New("the access token has no subject")
+	}
+	return sub, nil
+}
+
+// resolve turns a user-supplied group reference into a concrete group plus its
+// server, refusing anything the caller has not registered.
+func (t *tools) resolve(ctx context.Context, sub, ref string) (resolved, error) {
+	if ref == "" {
+		return resolved{}, errors.New("group is required; call list_groups to see the available ones")
+	}
+
+	group, err := t.deps.Store.ResolveGroup(ctx, sub, ref)
+	if errors.Is(err, store.ErrNotFound) {
+		return resolved{}, fmt.Errorf(
+			"no group %q is available to you; call list_groups, or add it in the config page", ref)
+	}
+	if err != nil {
+		return resolved{}, err
+	}
+
+	server, err := t.deps.Store.GetServer(ctx, sub, group.ServerID)
+	if err != nil {
+		return resolved{}, fmt.Errorf("load server for group %q: %w", group.Alias, err)
+	}
+	return resolved{group: group, server: server}, nil
+}
+
+// toolError converts a handler failure into a tool-level error result.
+//
+// These are returned as IsError results rather than protocol errors so the
+// model sees the message and can correct itself — a wrong alias should prompt a
+// list_groups call, not abort the conversation.
+func toolError[Out any](err error) (*mcp.CallToolResult, Out, error) {
+	var zero Out
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+	}, zero, nil
+}
+
+// toolResult pairs a structured output value with a short text rendering, since
+// not every client surfaces structured content.
+func toolResult[Out any](summary string, out Out) (*mcp.CallToolResult, Out, error) {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: summary}},
+	}, out, nil
+}
