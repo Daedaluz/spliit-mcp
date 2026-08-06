@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -71,9 +72,13 @@ func (s *Server) Routes() http.Handler {
 		r.Any("/mcp/*path", mcp)
 	}
 
-	// Config web UI login. These are net/http handlers from the OIDC library.
-	r.GET("/auth/login", gin.WrapF(s.LoginHandler()))
-	r.GET("/auth/callback", gin.WrapF(s.CallbackHandler()))
+	// Config web UI login. These are net/http handlers from the OIDC library,
+	// and building them needs a discovered provider — which tests of the rest of
+	// the routing table should not have to stand up.
+	if s.oidc != nil {
+		r.GET("/auth/login", gin.WrapF(s.LoginHandler()))
+		r.GET("/auth/callback", gin.WrapF(s.CallbackHandler()))
+	}
 	r.POST("/auth/logout", s.LogoutHandler)
 
 	api := r.Group("/api", s.RequireSession())
@@ -158,9 +163,19 @@ func (s *Server) ProtectedResourceMetadata(c *gin.Context) {
 	// must be advertised even when this server enforces no particular scope.
 	// Publishing nothing makes the client request no scopes at all, and
 	// providers that mandate one reject the authorization request outright.
-	scopes := s.cfg.OIDC.RequiredScopes
+	//
+	// It defaults to including offline_access: a client that gets no refresh
+	// token has to send the user through a full login again the moment the
+	// access token expires.
+	scopes := s.cfg.OIDC.MCPScopes
 	if len(scopes) == 0 {
 		scopes = s.cfg.OIDC.Scopes
+	}
+	// Anything strictly required must be requested, so fold it in.
+	for _, required := range s.cfg.OIDC.RequiredScopes {
+		if !slices.Contains(scopes, required) {
+			scopes = append(scopes, required)
+		}
 	}
 	if len(scopes) > 0 {
 		metadata["scopes_supported"] = scopes

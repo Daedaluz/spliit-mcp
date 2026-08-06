@@ -22,6 +22,11 @@ oidc:
   client_secret: "change-me"
   scopes: ["openid", "profile", "email"]
 
+  # Advertised to MCP clients, which build their authorization request from it.
+  # offline_access is what earns a refresh token; without one the client has to
+  # send you through a full login again whenever the access token expires.
+  mcp_scopes: ["openid", "profile", "email", "offline_access"]
+
   # For MCP clients whose authorization server does not support Dynamic Client
   # Registration, pre-register a client and put its ID here.
   mcp_client_id: ""

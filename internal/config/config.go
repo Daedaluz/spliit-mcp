@@ -48,6 +48,11 @@ type OIDCConfig struct {
 	ClientSecret string
 	// Scopes requested during the web login.
 	Scopes []string
+	// MCPScopes is advertised to MCP clients, which build their authorization
+	// request from it. It includes offline_access by default: without a refresh
+	// token the client must send the user through a full login again every time
+	// the access token expires.
+	MCPScopes []string
 
 	// MCPClientID is advertised to MCP clients whose authorization server does
 	// not support Dynamic Client Registration. Optional.
@@ -97,6 +102,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database_url", "spliit-mcp.db")
 
 	v.SetDefault("oidc.scopes", []string{"openid", "profile", "email"})
+	v.SetDefault("oidc.mcp_scopes", []string{"openid", "profile", "email", "offline_access"})
 	v.SetDefault("oidc.skip_audience_check", false)
 
 	v.SetDefault("mcp.stateless", true)
@@ -130,7 +136,7 @@ func Load(path string) (*Config, error) {
 	for _, key := range []string{
 		"oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes",
 		"oidc.mcp_client_id", "oidc.required_scopes", "oidc.skip_audience_check",
-		"oidc.state_secret", "mcp.stateless",
+		"oidc.state_secret", "oidc.mcp_scopes", "mcp.stateless",
 		"spliit.default_url", "spliit.default_name", "spliit.timeout",
 		"session.ttl", "session.cookie_secure",
 	} {
@@ -149,6 +155,7 @@ func Load(path string) (*Config, error) {
 			ClientID:          v.GetString("oidc.client_id"),
 			ClientSecret:      v.GetString("oidc.client_secret"),
 			Scopes:            v.GetStringSlice("oidc.scopes"),
+			MCPScopes:         v.GetStringSlice("oidc.mcp_scopes"),
 			MCPClientID:       v.GetString("oidc.mcp_client_id"),
 			StateSecret:       v.GetString("oidc.state_secret"),
 			RequiredScopes:    v.GetStringSlice("oidc.required_scopes"),
