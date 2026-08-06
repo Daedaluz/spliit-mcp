@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -36,10 +35,6 @@ func (s *Server) LoginHandler() http.HandlerFunc {
 }
 
 // CallbackHandler completes the flow, upserts the user, and issues a session.
-//
-// On first login the user is seeded with a default Spliit server so the config
-// page is immediately usable; without it every new user would have to paste a
-// tRPC URL before they could add a single group.
 func (s *Server) CallbackHandler() http.HandlerFunc {
 	onSuccess := func(w http.ResponseWriter, r *http.Request,
 		tokens *zoidc.Tokens[*zoidc.IDTokenClaims], _ string, _ rp.RelyingParty,
@@ -52,15 +47,26 @@ func (s *Server) CallbackHandler() http.HandlerFunc {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 
+		// Plenty of providers keep name and email out of the ID token and serve
+		// them only from the userinfo endpoint, which leaves the display name
+		// falling back to the opaque subject. Fetch them when they are missing.
+		if claims.NeedsUserinfo() {
+			info, err := rp.Userinfo[*zoidc.UserInfo](ctx,
+				tokens.AccessToken, tokens.TokenType,
+				tokens.IDTokenClaims.GetSubject(), s.oidc.RelyingParty)
+			if err != nil {
+				// Not fatal: the user is authenticated either way, they just get
+				// a less friendly name until they set one.
+				s.log.Warn("fetch userinfo", "error", err, "sub", claims.Subject)
+			} else {
+				claims.MergeUserinfo(info)
+			}
+		}
+
 		user, err := s.store.UpsertUser(ctx, claims.Subject,
 			s.cfg.OIDC.Issuer, claims.Email, claims.DisplayName)
 		if err != nil {
 			fail("persist user", err)
-			return
-		}
-
-		if err := s.ensureDefaultServer(ctx, user.Sub); err != nil {
-			fail("seed default spliit server", err)
 			return
 		}
 
@@ -84,22 +90,6 @@ func (s *Server) CallbackHandler() http.HandlerFunc {
 	}
 
 	return rp.CodeExchangeHandler(onSuccess, s.oidc.RelyingParty)
-}
-
-// ensureDefaultServer gives a brand new user one registered Spliit instance.
-func (s *Server) ensureDefaultServer(ctx context.Context, sub string) error {
-	servers, err := s.store.ListServers(ctx, sub)
-	if err != nil {
-		return err
-	}
-	if len(servers) > 0 {
-		return nil
-	}
-	_, err = s.store.CreateServer(ctx, sub, s.cfg.Spliit.DefaultName, s.cfg.Spliit.DefaultURL)
-	if errors.Is(err, store.ErrConflict) {
-		return nil // Raced with a concurrent login; the row exists either way.
-	}
-	return err
 }
 
 // LogoutHandler ends the session and clears the cookie.

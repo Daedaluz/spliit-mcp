@@ -40,7 +40,7 @@ function GroupRow({ group, data }: { group: Group; data: AppData }) {
     setBusy(true)
     onError(null)
     try {
-      const preview = await api.previewGroup(group.server_id, group.spliit_group_id)
+      const preview = await api.previewGroup(group.spliit_group_id, group.base_url)
       setParticipants(preview.participants)
       setMode('participant')
     } catch (err) {
@@ -102,7 +102,7 @@ function GroupRow({ group, data }: { group: Group; data: AppData }) {
               <span className="muted"> — {group.group_name}</span>
             </div>
             <div className="muted small">
-              {group.server_name} · {group.currency} ·{' '}
+              {group.host} · {group.currency} ·{' '}
               {group.participant_name ? (
                 <>
                   you are <strong>{group.participant_name}</strong>

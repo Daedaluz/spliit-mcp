@@ -146,6 +146,7 @@ type groupSummary struct {
 	Name            string `json:"name"`
 	Currency        string `json:"currency"`
 	Server          string `json:"server"`
+	ServerURL       string `json:"server_url"`
 	YouAre          string `json:"you_are,omitempty"`
 	NeedsSetup      bool   `json:"needs_setup,omitempty"`
 	SpliitGroupID   string `json:"spliit_group_id"`
@@ -166,15 +167,6 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 	if err != nil {
 		return toolError[listGroupsOutput](err)
 	}
-	servers, err := t.deps.Store.ListServers(ctx, sub)
-	if err != nil {
-		return toolError[listGroupsOutput](err)
-	}
-
-	names := make(map[string]string, len(servers))
-	for _, srv := range servers {
-		names[srv.ID] = srv.Name
-	}
 
 	out := listGroupsOutput{Groups: make([]groupSummary, 0, len(groups))}
 	for _, g := range groups {
@@ -182,9 +174,10 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 			Alias:         g.Alias,
 			Name:          g.GroupName,
 			Currency:      g.Currency,
-			Server:        names[g.ServerID],
+			Server:        spliit.HostOf(g.BaseURL),
 			YouAre:        g.ParticipantName,
 			SpliitGroupID: g.SpliitGroupID,
+			ServerURL:     g.BaseURL,
 		}
 		if g.ParticipantID == "" {
 			summary.NeedsSetup = true
@@ -249,7 +242,7 @@ func (t *tools) getGroup(ctx context.Context, req *mcp.CallToolRequest, in getGr
 		Alias:    r.group.Alias,
 		Name:     group.Name,
 		Currency: group.Currency,
-		Server:   r.server.Name,
+		Server:   spliit.HostOf(r.baseURL()),
 		YouAre:   r.group.ParticipantName,
 	}
 	if group.Information != nil {
@@ -1025,7 +1018,9 @@ type createGroupInput struct {
 	Participants []string `json:"participants" jsonschema:"Names of the other participants; you are added automatically"`
 	Currency     string   `json:"currency,omitempty" jsonschema:"Currency symbol or code, e.g. SEK (default USD)"`
 	Alias        string   `json:"alias,omitempty" jsonschema:"Short alias for later tool calls (defaults to the group name)"`
-	Server       string   `json:"server,omitempty" jsonschema:"Name of the Spliit server to create it on (defaults to your only one)"`
+	// Creating has no group link to derive an instance from, so this is the one
+	// place a URL must be named to use a non-default instance.
+	ServerURL string `json:"server_url,omitempty" jsonschema:"tRPC base URL of the Spliit instance to create it on (defaults to this server's default instance)"`
 }
 
 type createGroupOutput struct {
@@ -1051,10 +1046,7 @@ func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in cr
 		return toolError[createGroupOutput](fmt.Errorf("name is required"))
 	}
 
-	server, err := t.pickServer(ctx, sub, in.Server)
-	if err != nil {
-		return toolError[createGroupOutput](err)
-	}
+	baseURL := t.baseURLFor(in.ServerURL, "")
 
 	// The caller is always a participant; that is what makes the group usable
 	// through the other tools without a trip to the config page.
@@ -1074,7 +1066,7 @@ func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in cr
 		currency = "USD"
 	}
 
-	groupID, err := t.deps.Clients.CreateGroup(ctx, server.BaseURL, shape.ModifyGroupForm{
+	groupID, err := t.deps.Clients.CreateGroup(ctx, baseURL, shape.ModifyGroupForm{
 		Name:         strings.TrimSpace(in.Name),
 		Currency:     currency,
 		Participants: participants,
@@ -1084,7 +1076,7 @@ func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in cr
 	}
 
 	// Read it back to learn the generated participant IDs.
-	group, err := t.deps.Clients.GetGroup(ctx, server.BaseURL, groupID)
+	group, err := t.deps.Clients.GetGroup(ctx, baseURL, groupID)
 	if err != nil {
 		return toolError[createGroupOutput](err)
 	}
@@ -1094,18 +1086,18 @@ func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in cr
 		alias = group.Name
 	}
 
-	stored, err := t.registerGroup(ctx, sub, server.ID, group, alias, user.DisplayName)
+	stored, err := t.registerGroup(ctx, sub, baseURL, group, alias, user.DisplayName)
 	if err != nil {
 		return toolError[createGroupOutput](err)
 	}
 
 	out := createGroupOutput{
 		Alias: stored.Alias, Name: group.Name, SpliitGroupID: group.ID,
-		Server: server.Name, YouAre: stored.ParticipantName,
+		Server: spliit.HostOf(baseURL), YouAre: stored.ParticipantName,
 		Participants: spliit.ParticipantNames(group),
 	}
 	return toolResult(fmt.Sprintf("Created %q on %s with %s. Use alias %q in other tools.",
-		group.Name, server.Name, strings.Join(added, ", "), stored.Alias), out)
+		group.Name, out.Server, strings.Join(added, ", "), stored.Alias), out)
 }
 
 // registerGroup stores a freshly created group against the caller, pinning the
@@ -1115,12 +1107,12 @@ func (t *tools) createGroup(ctx context.Context, req *mcp.CallToolRequest, in cr
 // group already exists in Spliit at this point, and refusing to record it would
 // strand a group ID the user has no other way to recover.
 func (t *tools) registerGroup(
-	ctx context.Context, sub, serverID string,
+	ctx context.Context, sub, baseURL string,
 	group *model.Group, alias, displayName string,
 ) (*store.Group, error) {
 	row := &store.Group{
 		UserSub:       sub,
-		ServerID:      serverID,
+		BaseURL:       baseURL,
 		SpliitGroupID: group.ID,
 		Alias:         alias,
 		GroupName:     group.Name,
@@ -1151,43 +1143,14 @@ func (t *tools) registerGroup(
 		group.Name, group.ID)
 }
 
-// pickServer resolves a server by name, or returns the only one when the user
-// has just one registered.
-func (t *tools) pickServer(ctx context.Context, sub, name string) (*store.Server, error) {
-	servers, err := t.deps.Store.ListServers(ctx, sub)
-	if err != nil {
-		return nil, err
-	}
-	if len(servers) == 0 {
-		return nil, fmt.Errorf("you have no Spliit servers registered; add one in the config page")
-	}
-
-	if strings.TrimSpace(name) == "" {
-		if len(servers) == 1 {
-			return &servers[0], nil
-		}
-		available := make([]string, 0, len(servers))
-		for _, s := range servers {
-			available = append(available, s.Name)
-		}
-		return nil, fmt.Errorf("you have several Spliit servers; pass server as one of: %s",
-			strings.Join(available, ", "))
-	}
-
-	for i := range servers {
-		if strings.EqualFold(servers[i].Name, name) {
-			return &servers[i], nil
-		}
-	}
-	return nil, fmt.Errorf("no Spliit server named %q is registered for you", name)
-}
-
 // ---------------------------------------------------------------------------
 // inspect_group
 
 type inspectGroupInput struct {
 	GroupID string `json:"group_id" jsonschema:"A Spliit group ID, or the full group URL"`
-	Server  string `json:"server,omitempty" jsonschema:"Name of the Spliit server to look on (defaults to your only one)"`
+	// ServerURL is only needed for a bare ID on a non-default instance; a full
+	// group URL already says which instance hosts it.
+	ServerURL string `json:"server_url,omitempty" jsonschema:"tRPC base URL of the Spliit instance, if the group is given as a bare ID on a non-default instance"`
 }
 
 type inspectGroupOutput struct {
@@ -1195,6 +1158,7 @@ type inspectGroupOutput struct {
 	Name         string   `json:"name"`
 	Currency     string   `json:"currency"`
 	Server       string   `json:"server"`
+	ServerURL    string   `json:"server_url"`
 	Participants []string `json:"participants"`
 	// AlreadyJoined reports whether this group is already available to you.
 	AlreadyJoined bool   `json:"already_joined"`
@@ -1215,24 +1179,22 @@ func (t *tools) inspectGroup(ctx context.Context, req *mcp.CallToolRequest, in i
 		return toolError[inspectGroupOutput](err)
 	}
 
-	server, err := t.pickServer(ctx, sub, in.Server)
-	if err != nil {
-		return toolError[inspectGroupOutput](err)
-	}
+	baseURL := t.baseURLFor(in.ServerURL, in.GroupID)
 
 	groupID := spliit.ExtractGroupID(strings.TrimSpace(in.GroupID))
 	if groupID == "" {
 		return toolError[inspectGroupOutput](fmt.Errorf("group_id is required"))
 	}
 
-	group, err := t.deps.Clients.GetGroup(ctx, server.BaseURL, groupID)
+	group, err := t.deps.Clients.GetGroup(ctx, baseURL, groupID)
 	if err != nil {
 		return toolError[inspectGroupOutput](err)
 	}
 
 	out := inspectGroupOutput{
 		GroupID: group.ID, Name: group.Name, Currency: group.Currency,
-		Server: server.Name, Participants: spliit.ParticipantNames(group),
+		Server: spliit.HostOf(baseURL), ServerURL: baseURL,
+		Participants: spliit.ParticipantNames(group),
 	}
 
 	// Surface an existing membership so the model does not try to join twice.
@@ -1259,9 +1221,10 @@ type joinGroupInput struct {
 	GroupID string `json:"group_id" jsonschema:"A Spliit group ID, or the full group URL"`
 	// You is required: a group joined without knowing which participant the
 	// caller is cannot be written to, so it is asked for up front.
-	You    string `json:"you" jsonschema:"Which participant in the group is you (use inspect_group to see the names)"`
-	Alias  string `json:"alias,omitempty" jsonschema:"Short alias for later tool calls (defaults to the group name)"`
-	Server string `json:"server,omitempty" jsonschema:"Name of the Spliit server hosting it (defaults to your only one)"`
+	You   string `json:"you" jsonschema:"Which participant in the group is you (use inspect_group to see the names)"`
+	Alias string `json:"alias,omitempty" jsonschema:"Short alias for later tool calls (defaults to the group name)"`
+	// See inspectGroupInput.ServerURL.
+	ServerURL string `json:"server_url,omitempty" jsonschema:"tRPC base URL of the Spliit instance, if the group is given as a bare ID on a non-default instance"`
 }
 
 type joinGroupOutput struct {
@@ -1278,10 +1241,7 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 		return toolError[joinGroupOutput](err)
 	}
 
-	server, err := t.pickServer(ctx, sub, in.Server)
-	if err != nil {
-		return toolError[joinGroupOutput](err)
-	}
+	baseURL := t.baseURLFor(in.ServerURL, in.GroupID)
 
 	groupID := spliit.ExtractGroupID(strings.TrimSpace(in.GroupID))
 	if groupID == "" {
@@ -1292,7 +1252,7 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 			"you is required: name which participant you are, or call inspect_group first to see the options"))
 	}
 
-	group, err := t.deps.Clients.GetGroup(ctx, server.BaseURL, groupID)
+	group, err := t.deps.Clients.GetGroup(ctx, baseURL, groupID)
 	if err != nil {
 		return toolError[joinGroupOutput](err)
 	}
@@ -1310,7 +1270,7 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 	}
 
 	stored, err := t.deps.Store.CreateGroup(ctx, &store.Group{
-		UserSub: sub, ServerID: server.ID, SpliitGroupID: group.ID,
+		UserSub: sub, BaseURL: baseURL, SpliitGroupID: group.ID,
 		Alias: alias, GroupName: group.Name, Currency: group.Currency,
 		ParticipantID: participant.ID, ParticipantName: participant.Name,
 	})
@@ -1327,7 +1287,7 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 			group.Name, participant.Name, stored.Alias),
 		joinGroupOutput{
 			Alias: stored.Alias, Name: group.Name, SpliitGroupID: group.ID,
-			Server: server.Name, YouAre: participant.Name,
+			Server: spliit.HostOf(baseURL), YouAre: participant.Name,
 		})
 }
 

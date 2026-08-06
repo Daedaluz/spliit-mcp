@@ -8,25 +8,31 @@ import { api } from '../api'
  * These are deliberately not separable: a group that exists in Spliit but was
  * never registered here is unreachable, and Spliit offers no way to list groups
  * to find it again.
+ *
+ * Creating is the one place with no group link to derive an instance from, so
+ * the target is offered explicitly — defaulted, and suggesting the instances
+ * already in use.
  */
 export function CreateGroup({ data }: { data: AppData }) {
-  const { servers, me, reload, onError } = data
+  const { groups, me, reload, onError } = data
 
-  const [serverId, setServerId] = useState('')
+  // Instances already in use are the realistic options, and the empty default
+  // means "this server's configured instance".
+  const knownInstances = Array.from(new Set(groups.map((g) => g.base_url))).sort()
+
+  const [baseUrl, setBaseUrl] = useState('')
   const [name, setName] = useState('')
   const [currency, setCurrency] = useState('USD')
   const [yourName, setYourName] = useState(me.display_name)
   const [others, setOthers] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const effectiveServerId = serverId || servers[0]?.id || ''
-
   async function create() {
     setBusy(true)
     onError(null)
     try {
       await api.createGroup({
-        server_id: effectiveServerId,
+        base_url: baseUrl.trim(),
         name: name.trim(),
         currency: currency.trim(),
         alias: '',
@@ -47,10 +53,6 @@ export function CreateGroup({ data }: { data: AppData }) {
     }
   }
 
-  if (servers.length === 0) {
-    return null
-  }
-
   return (
     <section className="card">
       <h2>Create a group</h2>
@@ -60,19 +62,6 @@ export function CreateGroup({ data }: { data: AppData }) {
       </p>
 
       <div className="row">
-        {servers.length > 1 && (
-          <select
-            value={effectiveServerId}
-            onChange={(e) => setServerId(e.target.value)}
-            aria-label="Spliit server"
-          >
-            {servers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        )}
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -105,6 +94,22 @@ export function CreateGroup({ data }: { data: AppData }) {
           rows={3}
           placeholder={'Anna\nErik'}
         />
+      </label>
+
+      <label className="field">
+        <span>Spliit instance — leave empty for the default</span>
+        <input
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder="https://spliit.example.com/api/trpc"
+          list="known-instances"
+          aria-label="Spliit instance tRPC URL"
+        />
+        <datalist id="known-instances">
+          {knownInstances.map((url) => (
+            <option key={url} value={url} />
+          ))}
+        </datalist>
       </label>
 
       <div className="row">

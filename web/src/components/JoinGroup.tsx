@@ -6,28 +6,27 @@ import { api, GroupPreview } from '../api'
  * Two-step join. Step one reads the group from Spliit without storing anything,
  * so the real participant list can be shown; step two commits it.
  *
- * The lookup exists because a group ID is the only credential Spliit has — a
- * wrong one should fail visibly here rather than leave a broken row that only
- * errors later during a tool call. Choosing who you are is mandatory, since a
- * group joined without that identity cannot be written to at all.
+ * There is no instance to pick: a pasted group URL says which Spliit hosts it,
+ * and a bare ID falls back to this server's default instance. The lookup step
+ * exists because a group ID is the only credential Spliit has — a wrong one
+ * should fail visibly here rather than leave a broken row that only errors later
+ * during a tool call. Choosing who you are is mandatory, since a group joined
+ * without that identity cannot be written to at all.
  */
 export function JoinGroup({ data }: { data: AppData }) {
-  const { servers, reload, onError } = data
+  const { reload, onError } = data
 
-  const [serverId, setServerId] = useState('')
   const [groupId, setGroupId] = useState('')
   const [preview, setPreview] = useState<GroupPreview | null>(null)
   const [alias, setAlias] = useState('')
   const [participantId, setParticipantId] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const effectiveServerId = serverId || servers[0]?.id || ''
-
   async function lookup() {
     setBusy(true)
     onError(null)
     try {
-      const result = await api.previewGroup(effectiveServerId, groupId)
+      const result = await api.previewGroup(groupId)
       setPreview(result)
       setAlias(result.name)
       setParticipantId(result.suggested_participant)
@@ -43,7 +42,7 @@ export function JoinGroup({ data }: { data: AppData }) {
     setBusy(true)
     onError(null)
     try {
-      await api.joinGroup(effectiveServerId, preview!.group_id, alias.trim(), participantId)
+      await api.joinGroup(preview!.group_id, preview!.base_url, alias.trim(), participantId)
       reset()
       await reload()
     } catch (err) {
@@ -60,15 +59,6 @@ export function JoinGroup({ data }: { data: AppData }) {
     setParticipantId('')
   }
 
-  if (servers.length === 0) {
-    return (
-      <section className="card">
-        <h2>Join a group</h2>
-        <p className="muted">Add a Spliit server first.</p>
-      </section>
-    )
-  }
-
   return (
     <section className="card">
       <h2>Join a group</h2>
@@ -76,29 +66,16 @@ export function JoinGroup({ data }: { data: AppData }) {
       {!preview ? (
         <>
           <p className="muted">
-            Paste a group ID or the full Spliit group URL. Anyone holding a group
-            ID has full access to that group, which is why they live behind your
-            login here.
+            Paste a group link, or a bare group ID to use the default Spliit
+            instance. Anyone holding a group ID has full access to that group,
+            which is why they live behind your login here.
           </p>
           <div className="row">
-            {servers.length > 1 && (
-              <select
-                value={effectiveServerId}
-                onChange={(e) => setServerId(e.target.value)}
-                aria-label="Spliit server"
-              >
-                {servers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            )}
             <input
               value={groupId}
               onChange={(e) => setGroupId(e.target.value)}
-              placeholder="Group ID or https://spliit.app/groups/…"
-              aria-label="Group ID"
+              placeholder="https://spliit.app/groups/… or a group ID"
+              aria-label="Group link or ID"
             />
             <button className="button primary" disabled={!groupId.trim() || busy} onClick={lookup}>
               {busy ? 'Looking up…' : 'Look up'}
@@ -109,7 +86,9 @@ export function JoinGroup({ data }: { data: AppData }) {
         <>
           <p>
             Found <strong>{preview.name}</strong>{' '}
-            <span className="muted">({preview.currency})</span>
+            <span className="muted">
+              ({preview.currency}) on {preview.host}
+            </span>
           </p>
 
           <label className="field">

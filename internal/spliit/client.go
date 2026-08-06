@@ -264,6 +264,58 @@ func FindParticipantByName(group *model.Group, name string) *model.Participant {
 	return nil
 }
 
+// DeriveBaseURL works out a Spliit instance's tRPC base URL from a group link.
+//
+// It keeps whatever path precedes /groups/, so an instance hosted under a
+// subpath (https://example.com/spliit/groups/<id>) resolves correctly to
+// https://example.com/spliit/api/trpc — a plain origin + /api/trpc would not.
+//
+// Returns "" when the input is not a URL containing a /groups/ segment, which
+// is the caller's signal to fall back to the configured default instance.
+func DeriveBaseURL(input string) string {
+	input = strings.TrimSpace(input)
+	if !strings.Contains(input, "://") {
+		return ""
+	}
+
+	parsed, err := url.Parse(input)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	prefix := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "groups" {
+			base := &url.URL{
+				Scheme: parsed.Scheme,
+				Host:   parsed.Host,
+				Path:   "/" + strings.Join(append(prefix, "api", "trpc"), "/"),
+			}
+			return base.String()
+		}
+		prefix = append(prefix, part)
+	}
+	return ""
+}
+
+// HostOf renders a base URL as something worth showing a user: the host, plus
+// any subpath that distinguishes two instances on the same host.
+func HostOf(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" {
+		return baseURL
+	}
+	path := strings.TrimSuffix(strings.Trim(parsed.Path, "/"), "api/trpc")
+	if path = strings.Trim(path, "/"); path != "" {
+		return parsed.Host + "/" + path
+	}
+	return parsed.Host
+}
+
 // ExtractGroupID accepts either a bare group ID or a full Spliit URL such as
 // https://spliit.app/groups/<id>/expenses, since pasting the browser URL is the
 // natural thing to do when naming a group.

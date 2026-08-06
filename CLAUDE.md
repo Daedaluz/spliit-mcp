@@ -54,7 +54,17 @@ web/               Vite + React 18 SPA (react-router; pages/ + components/)
 
 The SPA has two routes: `/` lists the groups the MCP client can reach, and
 `/settings` is where anything that changes membership happens — identity,
-servers, joining, creating and removing groups.
+joining, creating and removing groups.
+
+### No server registry
+
+A Spliit instance is a `base_url` column on `groups`, not its own table. The
+tRPC base URL is derived from the group link the user pastes
+(`spliit.DeriveBaseURL`, which preserves a subpath so
+`https://host/spliit/groups/x` resolves to `https://host/spliit/api/trpc`), a
+bare group ID falls back to `spliit.default_url`, and creating a group is the
+one case that may name a URL explicitly. Registering instances separately was a
+step that carried no information the join did not already have.
 
 ### Dual database
 
@@ -84,6 +94,13 @@ Spliit stores integer minor units (`amount.Amount`). Tools accept and return
 **decimal strings**, never floats. Convert with `spliit.ToAmount`, which shifts
 and rounds — the upstream `amount.FromDecimal` demands an exponent of exactly
 `-2` and would reject a plain `10.5`.
+
+### Identity claims
+
+Many providers keep `name` and `email` out of the ID token and serve them only
+from the userinfo endpoint, which leaves the display name falling back to the
+opaque subject. `Claims.NeedsUserinfo` detects that and the callback fetches
+userinfo to fill the gaps; a failure there is logged, not fatal.
 
 ### "You"
 

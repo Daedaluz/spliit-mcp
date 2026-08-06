@@ -102,57 +102,41 @@ func TestUserLifecycle(t *testing.T) {
 	})
 }
 
-func TestServerAndGroupConstraints(t *testing.T) {
+func TestGroupConstraints(t *testing.T) {
 	eachEngine(t, func(t *testing.T, s *store.Store) {
 		ctx := context.Background()
 
 		if _, err := s.UpsertUser(ctx, "sub-1", "https://issuer", "", "Tobias"); err != nil {
 			t.Fatalf("user: %v", err)
 		}
-		srvA, err := s.CreateServer(ctx, "sub-1", "spliit.app", "https://spliit.app/api/trpc")
-		if err != nil {
-			t.Fatalf("create server: %v", err)
-		}
-		srvB, err := s.CreateServer(ctx, "sub-1", "home", "https://spliit.home/api/trpc")
-		if err != nil {
-			t.Fatalf("create second server: %v", err)
-		}
 
-		if _, err := s.CreateServer(ctx, "sub-1", "home", "https://other"); !errors.Is(err, store.ErrConflict) {
-			t.Errorf("duplicate server name: err = %v, want ErrConflict", err)
-		}
+		const (
+			appURL  = "https://spliit.app/api/trpc"
+			homeURL = "https://spliit.home/api/trpc"
+		)
 
-		mk := func(serverID, groupID, alias string) error {
+		mk := func(baseURL, groupID, alias string) error {
 			_, err := s.CreateGroup(ctx, &store.Group{
-				UserSub: "sub-1", ServerID: serverID, SpliitGroupID: groupID,
+				UserSub: "sub-1", BaseURL: baseURL, SpliitGroupID: groupID,
 				Alias: alias, ParticipantID: "p1", ParticipantName: "Tobias",
 			})
 			return err
 		}
 
-		if err := mk(srvA.ID, "grp-1", "trip"); err != nil {
+		if err := mk(appURL, "grp-1", "trip"); err != nil {
 			t.Fatalf("create group: %v", err)
 		}
-		// Same alias, different server: still a conflict, aliases are per user.
-		if err := mk(srvB.ID, "grp-9", "trip"); !errors.Is(err, store.ErrConflict) {
-			t.Errorf("duplicate alias across servers: err = %v, want ErrConflict", err)
+		// Same alias, different instance: still a conflict, aliases are per user.
+		if err := mk(homeURL, "grp-9", "trip"); !errors.Is(err, store.ErrConflict) {
+			t.Errorf("duplicate alias across instances: err = %v, want ErrConflict", err)
 		}
-		// Same group ID on a *different* server is a genuinely different group.
-		if err := mk(srvB.ID, "grp-1", "trip-home"); err != nil {
-			t.Errorf("same group id on another server should be allowed, got %v", err)
+		// The same group ID on a *different* instance is a different group.
+		if err := mk(homeURL, "grp-1", "trip-home"); err != nil {
+			t.Errorf("same group id on another instance should be allowed, got %v", err)
 		}
-		// Same group ID on the same server is a duplicate.
-		if err := mk(srvA.ID, "grp-1", "trip-again"); !errors.Is(err, store.ErrConflict) {
-			t.Errorf("duplicate group on one server: err = %v, want ErrConflict", err)
-		}
-
-		// A server still holding groups must not be deletable.
-		n, err := s.CountGroupsForServer(ctx, "sub-1", srvA.ID)
-		if err != nil {
-			t.Fatalf("count groups: %v", err)
-		}
-		if n != 1 {
-			t.Errorf("groups on server A = %d, want 1", n)
+		// The same group ID on the same instance is a duplicate.
+		if err := mk(appURL, "grp-1", "trip-again"); !errors.Is(err, store.ErrConflict) {
+			t.Errorf("duplicate group on one instance: err = %v, want ErrConflict", err)
 		}
 	})
 }
@@ -166,12 +150,8 @@ func TestResolveGroupIsScopedToUser(t *testing.T) {
 				t.Fatalf("user %s: %v", sub, err)
 			}
 		}
-		srv, err := s.CreateServer(ctx, "alice", "spliit.app", "https://spliit.app/api/trpc")
-		if err != nil {
-			t.Fatalf("server: %v", err)
-		}
 		g, err := s.CreateGroup(ctx, &store.Group{
-			UserSub: "alice", ServerID: srv.ID, SpliitGroupID: "secret-group",
+			UserSub: "alice", BaseURL: "https://spliit.app/api/trpc", SpliitGroupID: "secret-group",
 			Alias: "trip", ParticipantID: "p1", ParticipantName: "Alice",
 		})
 		if err != nil {

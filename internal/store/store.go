@@ -43,22 +43,14 @@ type User struct {
 	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
 }
 
-// Server is one Spliit instance a user has registered.
-type Server struct {
-	ID        string    `db:"id" json:"id"`
-	UserSub   string    `db:"user_sub" json:"-"`
-	Name      string    `db:"name" json:"name"`
-	BaseURL   string    `db:"base_url" json:"base_url"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
-}
-
 // Group is a Spliit group a user has made available to MCP, together with the
 // participant that represents them in it.
 type Group struct {
-	ID       string `db:"id" json:"id"`
-	UserSub  string `db:"user_sub" json:"-"`
-	ServerID string `db:"server_id" json:"server_id"`
+	ID      string `db:"id" json:"id"`
+	UserSub string `db:"user_sub" json:"-"`
+	// BaseURL is the tRPC endpoint of the Spliit instance hosting this group,
+	// derived from the link the user pasted rather than configured separately.
+	BaseURL string `db:"base_url" json:"base_url"`
 	// SpliitGroupID is the ID in the Spliit instance. It is a bearer capability:
 	// anyone holding it has full access to the group.
 	SpliitGroupID string `db:"spliit_group_id" json:"spliit_group_id"`
@@ -139,97 +131,17 @@ func (s *Store) SetDisplayName(ctx context.Context, sub, displayName string) err
 	return requireAffected(res)
 }
 
-// CreateServer registers a Spliit instance for a user.
-func (s *Store) CreateServer(ctx context.Context, sub, name, baseURL string) (*Server, error) {
-	now := time.Now().UTC()
-	srv := &Server{
-		ID: uuid.NewString(), UserSub: sub, Name: name, BaseURL: baseURL,
-		CreatedAt: now, UpdatedAt: now,
-	}
-	_, err := s.db.ExecContext(ctx, s.rebind(
-		`INSERT INTO servers (id, user_sub, name, base_url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-	), srv.ID, srv.UserSub, srv.Name, srv.BaseURL, srv.CreatedAt, srv.UpdatedAt)
-	if err != nil {
-		return nil, wrapWriteErr("insert server", err)
-	}
-	return srv, nil
-}
-
-// ListServers returns a user's registered Spliit instances, oldest first.
-func (s *Store) ListServers(ctx context.Context, sub string) ([]Server, error) {
-	servers := []Server{}
-	if err := s.db.SelectContext(ctx, &servers, s.rebind(
-		`SELECT * FROM servers WHERE user_sub = ? ORDER BY created_at`,
-	), sub); err != nil {
-		return nil, fmt.Errorf("list servers: %w", err)
-	}
-	return servers, nil
-}
-
-// GetServer fetches one of the user's servers. The subject is part of the
-// predicate so a caller can never reach another user's row.
-func (s *Store) GetServer(ctx context.Context, sub, id string) (*Server, error) {
-	var srv Server
-	err := s.db.GetContext(ctx, &srv, s.rebind(
-		`SELECT * FROM servers WHERE id = ? AND user_sub = ?`,
-	), id, sub)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get server: %w", err)
-	}
-	return &srv, nil
-}
-
-// UpdateServer renames a server or repoints its base URL.
-func (s *Store) UpdateServer(ctx context.Context, sub, id, name, baseURL string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(
-		`UPDATE servers SET name = ?, base_url = ?, updated_at = ?
-		 WHERE id = ? AND user_sub = ?`,
-	), name, baseURL, time.Now().UTC(), id, sub)
-	if err != nil {
-		return wrapWriteErr("update server", err)
-	}
-	return requireAffected(res)
-}
-
-// DeleteServer removes a server. The groups FK is ON DELETE RESTRICT, so this
-// fails while groups still reference it; callers should report that as a
-// conflict rather than silently orphaning group IDs.
-func (s *Store) DeleteServer(ctx context.Context, sub, id string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(
-		`DELETE FROM servers WHERE id = ? AND user_sub = ?`,
-	), id, sub)
-	if err != nil {
-		return wrapWriteErr("delete server", err)
-	}
-	return requireAffected(res)
-}
-
-// CountGroupsForServer reports how many groups still reference a server.
-func (s *Store) CountGroupsForServer(ctx context.Context, sub, serverID string) (int, error) {
-	var n int
-	if err := s.db.GetContext(ctx, &n, s.rebind(
-		`SELECT COUNT(*) FROM groups WHERE server_id = ? AND user_sub = ?`,
-	), serverID, sub); err != nil {
-		return 0, fmt.Errorf("count groups for server: %w", err)
-	}
-	return n, nil
-}
-
 // CreateGroup makes a Spliit group available to a user's MCP session.
 func (s *Store) CreateGroup(ctx context.Context, g *Group) (*Group, error) {
 	now := time.Now().UTC()
 	g.ID, g.CreatedAt, g.UpdatedAt = uuid.NewString(), now, now
 
 	_, err := s.db.ExecContext(ctx, s.rebind(
-		`INSERT INTO groups (id, user_sub, server_id, spliit_group_id, alias,
+		`INSERT INTO groups (id, user_sub, base_url, spliit_group_id, alias,
 		                     participant_id, participant_name, group_name, currency,
 		                     created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-	), g.ID, g.UserSub, g.ServerID, g.SpliitGroupID, g.Alias,
+	), g.ID, g.UserSub, g.BaseURL, g.SpliitGroupID, g.Alias,
 		g.ParticipantID, g.ParticipantName, g.GroupName, g.Currency, g.CreatedAt, g.UpdatedAt)
 	if err != nil {
 		return nil, wrapWriteErr("insert group", err)

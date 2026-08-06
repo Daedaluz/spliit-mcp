@@ -6,17 +6,14 @@ import (
 	"testing"
 )
 
-// seedUserOnly registers a user and a server but no groups, which is the state
-// a fresh account is in before joining anything.
+// seedUserOnly registers a user with no groups, which is the state a fresh
+// account is in before joining anything.
 func (e *testEnv) seedUserOnly(t *testing.T, sub, displayName string) {
 	t.Helper()
-	ctx := context.Background()
 
-	if _, err := e.store.UpsertUser(ctx, sub, "https://issuer", sub+"@example.com", displayName); err != nil {
+	if _, err := e.store.UpsertUser(context.Background(), sub,
+		"https://issuer", sub+"@example.com", displayName); err != nil {
 		t.Fatalf("seed user: %v", err)
-	}
-	if _, err := e.store.CreateServer(ctx, sub, "test", e.baseURL); err != nil {
-		t.Fatalf("seed server: %v", err)
 	}
 }
 
@@ -43,13 +40,17 @@ func TestInspectGroupListsParticipantsWithoutJoining(t *testing.T) {
 	}
 }
 
-func TestInspectGroupAcceptsAFullURL(t *testing.T) {
+// A pasted group URL carries the instance with it, which is what makes a
+// separate server registry unnecessary. The fake Spliit here is on a random
+// port, so the call only succeeds if the base URL was genuinely derived from
+// the link rather than defaulted.
+func TestInspectGroupDerivesTheInstanceFromAURL(t *testing.T) {
 	env := setup(t)
 	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
 	env.seedUserOnly(t, "alice", "Tobias")
 
 	text, isErr := call(t, env.connect(t, "alice"), "inspect_group", map[string]any{
-		"group_id": "https://spliit.app/groups/grp-1/expenses",
+		"group_id": env.groupURL("grp-1"),
 	})
 	if isErr {
 		t.Fatalf("inspect_group with a URL errored: %s", text)
@@ -58,6 +59,38 @@ func TestInspectGroupAcceptsAFullURL(t *testing.T) {
 	// The ID must have been extracted from the URL before hitting Spliit.
 	if got := env.spliit.inputFor("groups.get")["groupId"]; got != "grp-1" {
 		t.Errorf("groupId sent upstream = %v, want grp-1", got)
+	}
+}
+
+// Joining by URL must store the derived instance, so later tool calls reach the
+// same place without the link.
+func TestJoinGroupByURLStoresTheDerivedInstance(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.getDetails"] = map[string]any{
+		"group": sampleGroup(), "participantsWithExpenses": []string{},
+	}
+	env.seedUserOnly(t, "alice", "Tobias")
+
+	session := env.connect(t, "alice")
+
+	if text, isErr := call(t, session, "join_group", map[string]any{
+		"group_id": env.groupURL("grp-1"), "you": "Tobias", "alias": "trip",
+	}); isErr {
+		t.Fatalf("join_group by URL errored: %s", text)
+	}
+
+	stored, err := env.store.ResolveGroup(context.Background(), "alice", "trip")
+	if err != nil {
+		t.Fatalf("resolve stored group: %v", err)
+	}
+	if stored.BaseURL != env.baseURL {
+		t.Errorf("stored base_url = %q, want the derived %q", stored.BaseURL, env.baseURL)
+	}
+
+	// And a plain alias call still reaches that instance.
+	if text, isErr := call(t, session, "get_group", map[string]any{"group": "trip"}); isErr {
+		t.Errorf("get_group after joining by URL errored: %s", text)
 	}
 }
 

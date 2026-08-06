@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -33,12 +34,11 @@ type Deps struct {
 
 // resolved is a group plus everything needed to call Spliit for it.
 type resolved struct {
-	group  *store.Group
-	server *store.Server
+	group *store.Group
 }
 
 // baseURL is the tRPC endpoint of the instance hosting this group.
-func (r resolved) baseURL() string { return r.server.BaseURL }
+func (r resolved) baseURL() string { return r.group.BaseURL }
 
 // spliitID is the group's ID within that instance.
 func (r resolved) spliitID() string { return r.group.SpliitGroupID }
@@ -146,12 +146,23 @@ func (t *tools) resolve(ctx context.Context, sub, ref string) (resolved, error) 
 	if err != nil {
 		return resolved{}, err
 	}
+	return resolved{group: group}, nil
+}
 
-	server, err := t.deps.Store.GetServer(ctx, sub, group.ServerID)
-	if err != nil {
-		return resolved{}, fmt.Errorf("load server for group %q: %w", group.Alias, err)
+// baseURLFor picks the Spliit instance for a request that is not yet tied to a
+// stored group: an explicit URL wins, then one derived from a pasted group
+// link, and finally the configured default.
+func (t *tools) baseURLFor(explicit, groupRef string) string {
+	if trimmed := strings.TrimRight(strings.TrimSpace(explicit), "/"); trimmed != "" {
+		return trimmed
 	}
-	return resolved{group: group, server: server}, nil
+	if derived := spliit.DeriveBaseURL(groupRef); derived != "" {
+		return derived
+	}
+	if t.deps.Config != nil {
+		return t.deps.Config.Spliit.DefaultURL
+	}
+	return ""
 }
 
 // toolError converts a handler failure into a tool-level error result.

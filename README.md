@@ -110,9 +110,9 @@ Two deployment shapes, as in `nextstop`:
 claude mcp add --transport http spliit https://spliit-mcp.example.com/mcp
 ```
 
-Add more Spliit instances under **Spliit servers** if you self-host alongside
-spliit.app. Group aliases are unique per user across all servers, so tools only
-ever need the alias.
+Self-hosting alongside spliit.app needs no setup: a pasted group link says which
+instance hosts it, and that is stored with the group. Aliases are unique per
+user across instances, so tools only ever need the alias.
 
 ## Tools
 
@@ -121,7 +121,8 @@ ever need the alias.
 `delete_expense`, `get_stats`, `list_activities`, `list_categories`.
 
 **Group management**, mirroring the settings page — `inspect_group`,
-`join_group`, `leave_group`, `create_group`, `set_active_participant`.
+`join_group`, `leave_group`, `create_group`, `set_active_participant`,
+`get_server_info`.
 
 Every tool takes `group` (an alias from `list_groups`). `create_expense` defaults
 to you having paid, split evenly between all participants. `get_balances` is

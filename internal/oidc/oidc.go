@@ -231,20 +231,47 @@ type Claims struct {
 // user always has something to match participants against.
 func ClaimsFromIDToken(claims *oidc.IDTokenClaims) Claims {
 	out := Claims{Subject: claims.Subject, Email: claims.Email}
-
-	switch {
-	case claims.Name != "":
-		out.DisplayName = claims.Name
-	case claims.PreferredUsername != "":
-		out.DisplayName = claims.PreferredUsername
-	case claims.GivenName != "":
-		out.DisplayName = claims.GivenName
-	case claims.Email != "":
-		out.DisplayName = claims.Email
-	default:
-		out.DisplayName = claims.Subject
-	}
+	out.DisplayName = pickDisplayName(
+		claims.Name, claims.PreferredUsername, claims.GivenName,
+		claims.Email, claims.Subject)
 	return out
+}
+
+// NeedsUserinfo reports whether the ID token left anything worth fetching from
+// the userinfo endpoint. The display name having fallen back to the subject is
+// the telling case: an opaque UUID matches no Spliit participant and reads as a
+// bug to the user.
+func (c Claims) NeedsUserinfo() bool {
+	return c.Email == "" || c.DisplayName == c.Subject
+}
+
+// MergeUserinfo fills in fields the ID token did not carry. Values already
+// present win, so a provider that sets them in both places stays consistent.
+func (c *Claims) MergeUserinfo(info *oidc.UserInfo) {
+	if info == nil {
+		return
+	}
+	if c.Email == "" {
+		c.Email = info.Email
+	}
+	if c.DisplayName == "" || c.DisplayName == c.Subject {
+		if name := pickDisplayName(
+			info.Name, info.PreferredUsername, info.GivenName,
+			info.Email, c.Subject,
+		); name != "" {
+			c.DisplayName = name
+		}
+	}
+}
+
+// pickDisplayName returns the first non-empty candidate.
+func pickDisplayName(candidates ...string) string {
+	for _, candidate := range candidates {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // State generates an unguessable OAuth state value.

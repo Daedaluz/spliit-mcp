@@ -180,6 +180,12 @@ func setup(t *testing.T) *testEnv {
 	return &testEnv{store: st, spliit: fake, url: httpServer.URL, baseURL: baseURL}
 }
 
+// groupURL renders a browser-style group link on the fake Spliit instance, of
+// the shape a user would paste.
+func (e *testEnv) groupURL(groupID string) string {
+	return strings.TrimSuffix(e.baseURL, "/api/trpc") + "/groups/" + groupID + "/expenses"
+}
+
 // connect opens an MCP session authenticated as the given subject.
 func (e *testEnv) connect(t *testing.T, subject string) *mcpsdk.ClientSession {
 	t.Helper()
@@ -240,23 +246,8 @@ func (e *testEnv) seed(t *testing.T, sub, alias, groupID, participantID, partici
 	if _, err := e.store.UpsertUser(ctx, sub, "https://issuer", sub+"@example.com", participantName); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	servers, err := e.store.ListServers(ctx, sub)
-	if err != nil {
-		t.Fatalf("list servers: %v", err)
-	}
-	var serverID string
-	if len(servers) > 0 {
-		serverID = servers[0].ID
-	} else {
-		srv, err := e.store.CreateServer(ctx, sub, "test", e.baseURL)
-		if err != nil {
-			t.Fatalf("seed server: %v", err)
-		}
-		serverID = srv.ID
-	}
-
 	group, err := e.store.CreateGroup(ctx, &store.Group{
-		UserSub: sub, ServerID: serverID, SpliitGroupID: groupID, Alias: alias,
+		UserSub: sub, BaseURL: e.baseURL, SpliitGroupID: groupID, Alias: alias,
 		ParticipantID: participantID, ParticipantName: participantName,
 		GroupName: "Test Group", Currency: "SEK",
 	})

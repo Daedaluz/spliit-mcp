@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
-import { api, Group, Me, Server, ServerConfig, UnauthorizedError } from './api'
+import { api, Group, Me, ServerConfig, UnauthorizedError } from './api'
 import { GroupsPage } from './pages/GroupsPage'
 import { SettingsPage } from './pages/SettingsPage'
 
@@ -8,7 +8,6 @@ import { SettingsPage } from './pages/SettingsPage'
 export interface AppData {
   me: Me
   config: ServerConfig
-  servers: Server[]
   groups: Group[]
   reload: () => Promise<void>
   onError: (message: string | null) => void
@@ -18,7 +17,6 @@ export interface AppData {
 export function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [config, setConfig] = useState<ServerConfig | null>(null)
-  const [servers, setServers] = useState<Server[]>([])
   const [groups, setGroups] = useState<Group[]>([])
   const [loading, setLoading] = useState(true)
   const [signedOut, setSignedOut] = useState(false)
@@ -26,15 +24,13 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [meResult, configResult, serverResult, groupResult] = await Promise.all([
+      const [meResult, configResult, groupResult] = await Promise.all([
         api.getMe(),
         api.getConfig(),
-        api.listServers(),
         api.listGroups(),
       ])
       setMe(meResult)
       setConfig(configResult)
-      setServers(serverResult)
       setGroups(groupResult)
       setSignedOut(false)
       setError(null)
@@ -75,14 +71,15 @@ export function App() {
     )
   }
 
-  const data: AppData = { me, config, servers, groups, reload, onError: setError, setMe }
+  const data: AppData = { me, config, groups, reload, onError: setError, setMe }
 
   return (
     <main className="page">
       <header className="header">
         <h1>Spliit MCP</h1>
         <div className="header-actions">
-          <span className="muted">{me.email || me.sub}</span>
+          {/* The subject is an opaque UUID; only show it if nothing else exists. */}
+          <span className="muted">{me.display_name || me.email || me.sub}</span>
           <button
             className="button"
             onClick={async () => {
