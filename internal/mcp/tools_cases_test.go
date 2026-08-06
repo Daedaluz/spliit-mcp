@@ -209,8 +209,9 @@ func TestGroupWithoutPinnedParticipantGivesActionableError(t *testing.T) {
 	if !isErr {
 		t.Fatalf("expected an error when no participant is pinned, got: %s", text)
 	}
-	if !strings.Contains(text, "config page") {
-		t.Errorf("error should point at the config page, got: %s", text)
+	// The error has to name the fix, or the model has nothing to act on.
+	if !strings.Contains(text, "set_active_participant") {
+		t.Errorf("error should name the tool that fixes it, got: %s", text)
 	}
 }
 

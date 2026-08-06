@@ -303,3 +303,32 @@ input.narrow {
   font-size: 0.86rem;
   margin: 0.5rem 0 0;
 }
+
+/* Copyable values */
+.copy-field {
+  margin-top: 0.85rem;
+}
+
+.copy-label {
+  display: block;
+  font-size: 0.86rem;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+
+.copy-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.copy-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

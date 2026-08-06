@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { AppData } from '../App'
 import { GroupList } from '../components/GroupList'
+import { ConnectCard } from '../components/ConnectCard'
 
 /**
  * The overview: what your MCP client can currently reach. Everything that
@@ -35,13 +36,7 @@ export function GroupsPage({ data }: { data: AppData }) {
         )}
       </section>
 
-      <section className="card">
-        <h2>Connecting a client</h2>
-        <p className="muted">Point an MCP client at this server:</p>
-        <pre className="snippet">
-          claude mcp add --transport http spliit {window.location.origin}/mcp
-        </pre>
-      </section>
+      <ConnectCard config={data.config} />
     </>
   )
 }

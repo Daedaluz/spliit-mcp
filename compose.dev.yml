@@ -11,6 +11,11 @@
 # .env.example. That keeps the stack usable with whatever you already run,
 # rather than pinning it to one vendor's container.
 #
+# To reach the stack from other machines, set PUBLIC_HOST in .env to this
+# machine's LAN address or hostname. Publishing the ports is not enough on its
+# own: the OIDC redirect URI, the token audience and Spliit's own base URL are
+# all built from that host, so they must be the address clients actually use.
+#
 # The only hard requirement is that SPLIIT_MCP_OIDC_ISSUER resolves to the same
 # URL from your browser and from inside these containers, since the browser
 # follows redirects there and the backend fetches discovery and JWKS from it.
@@ -34,17 +39,19 @@ services:
       retries: 20
 
   spliit:
-    # Spliit publishes no image, so build it from the upstream repo. Pinned to a
-    # ref rather than main so the stack does not drift underfoot; override with
-    # SPLIIT_REF to test against a different version.
+    # Spliit publishes no image, so build it from the upstream repo. Upstream
+    # cuts no tags, so this pins a specific commit rather than tracking main,
+    # which would let the stack drift underfoot. Override with SPLIIT_REF.
     build:
-      context: https://github.com/spliit-app/spliit.git#${SPLIIT_REF:-v1.19.0}
+      context: https://github.com/spliit-app/spliit.git#${SPLIIT_REF:-d3b151e1506f26fd582c30b09427606cc2fe7826}
     environment:
       POSTGRES_PRISMA_URL: postgresql://postgres:${SPLIIT_DB_PASSWORD:-spliit}@spliit-db:5432/spliit
       POSTGRES_URL_NON_POOLING: postgresql://postgres:${SPLIIT_DB_PASSWORD:-spliit}@spliit-db:5432/spliit
-      NEXT_PUBLIC_BASE_URL: http://localhost:${SPLIIT_PORT:-3000}
+      NEXT_PUBLIC_BASE_URL: http://${PUBLIC_HOST:-localhost}:${SPLIIT_PORT:-3000}
     ports:
-      - "${SPLIIT_PORT:-3000}:3000"
+      # BIND_ADDR defaults to every interface; set it to 127.0.0.1 to keep the
+      # stack private to this machine.
+      - "${BIND_ADDR:-0.0.0.0}:${SPLIIT_PORT:-3000}:3000"
     depends_on:
       spliit-db:
         condition: service_healthy
@@ -76,7 +83,7 @@ services:
       # The URL the browser and MCP clients actually use — the nginx front door,
       # not this container. It builds the OIDC redirect URI and the audience
       # that bearer tokens are checked against.
-      SPLIIT_MCP_PUBLIC_URL: ${SPLIIT_MCP_PUBLIC_URL:-http://localhost:8080}
+      SPLIIT_MCP_PUBLIC_URL: ${SPLIIT_MCP_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:${MCP_PORT:-8080}}
       # Empty: nginx serves the SPA in this split deployment.
       SPLIIT_MCP_WEB_DIR: ""
       SPLIIT_MCP_DATABASE_URL: postgres://postgres:${MCP_DB_PASSWORD:-spliitmcp}@mcp-db:5432/spliitmcp?sslmode=disable
@@ -103,7 +110,7 @@ services:
     environment:
       API_UPSTREAM: http://backend:8080
     ports:
-      - "${MCP_PORT:-8080}:80"
+      - "${BIND_ADDR:-0.0.0.0}:${MCP_PORT:-8080}:80"
     depends_on:
       - backend
 

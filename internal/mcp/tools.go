@@ -101,6 +101,13 @@ func (t *tools) register(s *mcp.Server) {
 	// Group management. Spliit has no notion of membership, so "joining" means
 	// registering a group ID here so the other tools can reach it.
 	mcp.AddTool(s, &mcp.Tool{
+		Name:  "get_server_info",
+		Title: "Get this server's URLs",
+		Description: "Get this server's MCP endpoint and config page URL, plus a ready-to-paste " +
+			"command for adding it on another machine.",
+	}, t.getServerInfo)
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:  "inspect_group",
 		Title: "Inspect a group before joining",
 		Description: "Look up a Spliit group by ID or URL without joining it, to see its " +
@@ -181,13 +188,15 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 		}
 		if g.ParticipantID == "" {
 			summary.NeedsSetup = true
-			summary.SetupHintForYou = "no participant is pinned as you; set one in the config page"
+			summary.SetupHintForYou = "no participant is set as you; fix it with set_active_participant, or in " + t.atConfigPage()
 		}
 		out.Groups = append(out.Groups, summary)
 	}
 
 	if len(out.Groups) == 0 {
-		return toolResult("You have no groups available yet. Add one in the spliit-mcp config page.", out)
+		return toolResult(fmt.Sprintf(
+			"You have no groups available yet. Join one with join_group, or add it in %s.",
+			t.atConfigPage()), out)
 	}
 	return toolResult(fmt.Sprintf("%d group(s) available.", len(out.Groups)), out)
 }
@@ -745,7 +754,8 @@ func (t *tools) buildExpenseForm(in expenseWriteInput, group *model.Group, r res
 		} else {
 			// The pinned participant was removed in Spliit since it was set.
 			return shape.ModifyExpenseForm{}, names, fmt.Errorf(
-				"%w: re-pick it in the config page", spliit.ErrParticipantMissing)
+				"%w: set it again with set_active_participant, or in %s",
+				spliit.ErrParticipantMissing, t.atConfigPage())
 		}
 	}
 
@@ -1401,4 +1411,55 @@ func (t *tools) setActiveParticipant(ctx context.Context, req *mcp.CallToolReque
 	return toolResult(
 		fmt.Sprintf("You are now %s in %q.", participant.Name, r.group.Alias),
 		setActiveParticipantOutput{Alias: r.group.Alias, YouAre: participant.Name})
+}
+
+// ---------------------------------------------------------------------------
+// get_server_info
+
+type getServerInfoInput struct{}
+
+type getServerInfoOutput struct {
+	// MCPURL is what another client should be pointed at.
+	MCPURL string `json:"mcp_url"`
+	// ConfigURL is the web UI for managing groups and identity.
+	ConfigURL string `json:"config_url"`
+	Issuer    string `json:"oidc_issuer"`
+	// MCPClientID is set when a client was pre-registered because the provider
+	// does not allow dynamic client registration.
+	MCPClientID string `json:"mcp_client_id,omitempty"`
+	// ClaudeCommand is ready to paste on another machine.
+	ClaudeCommand string `json:"claude_command"`
+	Version       string `json:"version"`
+}
+
+// getServerInfo reports how to reach this server, so the answer to "how do I
+// add this somewhere else" does not require reading the config page.
+func (t *tools) getServerInfo(_ context.Context, req *mcp.CallToolRequest, _ getServerInfoInput) (*mcp.CallToolResult, getServerInfoOutput, error) {
+	// Still identity-gated: these URLs describe a server whose whole purpose is
+	// guarding group IDs, so they are not handed to unauthenticated callers.
+	if _, err := t.userFromRequest(req); err != nil {
+		return toolError[getServerInfoOutput](err)
+	}
+
+	out := getServerInfoOutput{
+		MCPURL:    t.mcpURL(),
+		ConfigURL: t.configURL(),
+		Version:   t.deps.Version,
+	}
+	if t.deps.Config != nil {
+		out.Issuer = t.deps.Config.OIDC.Issuer
+		out.MCPClientID = t.deps.Config.OIDC.MCPClientID
+	}
+
+	command := "claude mcp add --transport http spliit " + out.MCPURL
+	if out.MCPClientID != "" {
+		// Without dynamic registration the client must be named, and its
+		// callback port pinned so the redirect URI can be registered upfront.
+		command += " --client-id " + out.MCPClientID + " --callback-port 45454"
+	}
+	out.ClaudeCommand = command
+
+	return toolResult(fmt.Sprintf(
+		"MCP endpoint: %s\nConfig page: %s\n\nTo add it on another machine:\n%s",
+		out.MCPURL, out.ConfigURL, command), out)
 }

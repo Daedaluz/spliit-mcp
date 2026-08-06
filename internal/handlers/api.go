@@ -54,6 +54,22 @@ func (s *Server) UpdateMe(c *gin.Context) {
 	})
 }
 
+// GetConfig returns the details needed to connect an MCP client to this server.
+//
+// The endpoint comes from the configured public URL rather than the browser's
+// origin: behind a reverse proxy the two can differ, and the public URL is the
+// one the OIDC redirect and token audience are already built from, so it is the
+// address that actually works.
+func (s *Server) GetConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"mcp_url": s.cfg.MCPResourceURL(),
+		"issuer":  s.cfg.OIDC.Issuer,
+		// Empty unless a client was pre-registered for providers that do not
+		// allow dynamic client registration.
+		"mcp_client_id": s.cfg.OIDC.MCPClientID,
+	})
+}
+
 // ListServers returns the user's registered Spliit instances.
 func (s *Server) ListServers(c *gin.Context) {
 	user := UserFromContext(c)

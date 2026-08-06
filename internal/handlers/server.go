@@ -80,6 +80,7 @@ func (s *Server) Routes() http.Handler {
 	{
 		api.GET("/me", s.GetMe)
 		api.PUT("/me", s.UpdateMe)
+		api.GET("/config", s.GetConfig)
 
 		api.GET("/servers", s.ListServers)
 		api.POST("/servers", s.CreateServer)
@@ -147,10 +148,19 @@ func (s *Server) ProtectedResourceMetadata(c *gin.Context) {
 		"bearer_methods_supported": []string{"header"},
 		"resource_name":            "spliit-mcp",
 	}
-	// Omit rather than publish a null when no scopes are required.
-	if len(s.cfg.OIDC.RequiredScopes) > 0 {
-		metadata["scopes_supported"] = s.cfg.OIDC.RequiredScopes
+
+	// Clients build their authorization request's `scope` from this list, so it
+	// must be advertised even when this server enforces no particular scope.
+	// Publishing nothing makes the client request no scopes at all, and
+	// providers that mandate one reject the authorization request outright.
+	scopes := s.cfg.OIDC.RequiredScopes
+	if len(scopes) == 0 {
+		scopes = s.cfg.OIDC.Scopes
 	}
+	if len(scopes) > 0 {
+		metadata["scopes_supported"] = scopes
+	}
+
 	c.JSON(http.StatusOK, metadata)
 }
 

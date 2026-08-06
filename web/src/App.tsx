@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
-import { api, Group, Me, Server, UnauthorizedError } from './api'
+import { api, Group, Me, Server, ServerConfig, UnauthorizedError } from './api'
 import { GroupsPage } from './pages/GroupsPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 /** Everything the pages read, reloaded together after any mutation. */
 export interface AppData {
   me: Me
+  config: ServerConfig
   servers: Server[]
   groups: Group[]
   reload: () => Promise<void>
@@ -16,6 +17,7 @@ export interface AppData {
 
 export function App() {
   const [me, setMe] = useState<Me | null>(null)
+  const [config, setConfig] = useState<ServerConfig | null>(null)
   const [servers, setServers] = useState<Server[]>([])
   const [groups, setGroups] = useState<Group[]>([])
   const [loading, setLoading] = useState(true)
@@ -24,12 +26,14 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [meResult, serverResult, groupResult] = await Promise.all([
+      const [meResult, configResult, serverResult, groupResult] = await Promise.all([
         api.getMe(),
+        api.getConfig(),
         api.listServers(),
         api.listGroups(),
       ])
       setMe(meResult)
+      setConfig(configResult)
       setServers(serverResult)
       setGroups(groupResult)
       setSignedOut(false)
@@ -57,7 +61,7 @@ export function App() {
     )
   }
 
-  if (signedOut || !me) {
+  if (signedOut || !me || !config) {
     return (
       <main className="page center">
         <h1>Spliit MCP</h1>
@@ -71,7 +75,7 @@ export function App() {
     )
   }
 
-  const data: AppData = { me, servers, groups, reload, onError: setError, setMe }
+  const data: AppData = { me, config, servers, groups, reload, onError: setError, setMe }
 
   return (
     <main className="page">

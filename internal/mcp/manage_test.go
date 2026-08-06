@@ -252,3 +252,38 @@ func TestJoinGroupIsScopedToTheCaller(t *testing.T) {
 		t.Errorf("bob should see no groups, got: %s", text)
 	}
 }
+
+func TestGetServerInfoReturnsConnectableURLs(t *testing.T) {
+	env := setup(t)
+	env.seedUserOnly(t, "alice", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "get_server_info", map[string]any{})
+	if isErr {
+		t.Fatalf("get_server_info errored: %s", text)
+	}
+
+	// The endpoint must be the configured public URL, not the listen address:
+	// it is what another machine has to dial.
+	if !strings.Contains(text, "http://localhost:8080/mcp") {
+		t.Errorf("should report the MCP endpoint, got: %s", text)
+	}
+	if !strings.Contains(text, "claude mcp add") {
+		t.Errorf("should include a ready-to-paste command, got: %s", text)
+	}
+}
+
+func TestGetServerInfoRequiresIdentity(t *testing.T) {
+	env := setup(t)
+
+	// These URLs describe a server whose purpose is guarding group IDs, so even
+	// this much is gated on a verified caller.
+	resp, err := httpPost(env.url)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+}

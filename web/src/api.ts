@@ -11,6 +11,14 @@ export interface Me {
   display_name: string
 }
 
+/** How to reach this server, as the server itself understands it. */
+export interface ServerConfig {
+  mcp_url: string
+  issuer: string
+  /** Empty unless a client was pre-registered for a provider without DCR. */
+  mcp_client_id: string
+}
+
 export interface Server {
   id: string
   name: string
@@ -76,6 +84,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getMe: () => request<Me>('/api/me'),
+
+  getConfig: () => request<ServerConfig>('/api/config'),
 
   setDisplayName: (display_name: string) =>
     request<Me>('/api/me', { method: 'PUT', body: JSON.stringify({ display_name }) }),

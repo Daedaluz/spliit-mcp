@@ -49,7 +49,8 @@ var errNoIdentity = errors.New("no participant is pinned as you for this group")
 // me returns the participant ID representing the caller in this group.
 func (r resolved) me() (string, error) {
 	if r.group.ParticipantID == "" {
-		return "", fmt.Errorf("%w: set it in the spliit-mcp config page", errNoIdentity)
+		return "", fmt.Errorf(
+			"%w: set it with set_active_participant", errNoIdentity)
 	}
 	return r.group.ParticipantID, nil
 }
@@ -61,27 +62,59 @@ func NewServer(deps Deps) *mcp.Server {
 		version = "dev"
 	}
 
+	t := &tools{deps: deps}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "spliit-mcp",
 		Title:   "Spliit",
 		Version: version,
 		Description: "Read and record shared expenses in Spliit groups. " +
 			"Groups are made available through the spliit-mcp config page.",
+		// Surfaced to clients at initialize, so the config page is discoverable
+		// without calling a tool first.
+		WebsiteURL: t.configURL(),
 	}, &mcp.ServerOptions{
 		Instructions: "Each tool takes a `group`, which is the alias shown by list_groups. " +
 			"Only groups the signed-in user has registered are reachable. " +
 			"Amounts are in the group's currency as decimal numbers, e.g. 12.50. " +
 			"When the user says \"I paid\" or \"my share\", that refers to the participant " +
-			"pinned as them in that group; leave paid_by empty to default to it.",
+			"pinned as them in that group; leave paid_by empty to default to it. " +
+			"Groups can also be joined and left through the tools; call get_server_info " +
+			"for this server's URLs when the user asks how to connect another client.",
 	})
 
-	t := &tools{deps: deps}
 	t.register(server)
 	return server
 }
 
 type tools struct {
 	deps Deps
+}
+
+// configURL is the address of the config web UI, empty if unconfigured.
+func (t *tools) configURL() string {
+	if t.deps.Config == nil {
+		return ""
+	}
+	return t.deps.Config.PublicURL
+}
+
+// mcpURL is this server's MCP endpoint, which doubles as its OAuth resource
+// identifier.
+func (t *tools) mcpURL() string {
+	if t.deps.Config == nil {
+		return ""
+	}
+	return t.deps.Config.MCPResourceURL()
+}
+
+// atConfigPage renders a pointer to the config UI, naming the URL when one is
+// configured so the user can act on it without asking where to go.
+func (t *tools) atConfigPage() string {
+	if url := t.configURL(); url != "" {
+		return "the config page at " + url
+	}
+	return "the spliit-mcp config page"
 }
 
 // userFromRequest extracts the authenticated OIDC subject from the verified
@@ -107,7 +140,8 @@ func (t *tools) resolve(ctx context.Context, sub, ref string) (resolved, error) 
 	group, err := t.deps.Store.ResolveGroup(ctx, sub, ref)
 	if errors.Is(err, store.ErrNotFound) {
 		return resolved{}, fmt.Errorf(
-			"no group %q is available to you; call list_groups, or add it in the config page", ref)
+			"no group %q is available to you; call list_groups to see them, "+
+				"or join_group to add it", ref)
 	}
 	if err != nil {
 		return resolved{}, err

@@ -35,6 +35,41 @@ fixing at the provider instead.
 If the provider issues opaque access tokens, spliit-mcp falls back to
 introspection, which needs `SPLIIT_MCP_OIDC_CLIENT_SECRET` set.
 
+### If the provider does not allow anonymous client registration
+
+MCP clients try to register themselves at the provider's
+`registration_endpoint` (RFC 7591). Many providers require an initial access
+token for that, and reject the attempt:
+
+```
+SDK auth failed: missing or invalid registration credential
+```
+
+That error comes from the **provider**, not from spliit-mcp. The fix is to
+pre-register a client and tell the MCP client to use it instead of registering.
+
+1. Create an application at your provider for the MCP client:
+   - a **public / PKCE** client (`token_endpoint_auth_method: none`) is enough
+   - redirect URI: `http://localhost:45454/callback` — Claude Code uses
+     `http://localhost:<callback-port>/callback`, and the port must be pinned
+     because the URI has to be registered ahead of time
+   - put it in the **same project/tenant** as the web UI client, or token
+     introspection will report the token as inactive
+
+2. Point Claude Code at it:
+
+   ```sh
+   claude mcp add --transport http spliit http://localhost:8080/mcp \
+     --client-id <the new client id> \
+     --callback-port 45454
+   ```
+
+   Add `--client-secret` too if you made it a confidential client.
+
+3. Set `SPLIIT_MCP_OIDC_MCP_CLIENT_ID` to the same client ID. spliit-mcp accepts
+   it as a valid token audience, which is what lets the audience check stay on
+   for providers that put the client ID in `aud` rather than a resource URL.
+
 ### The one constraint: the issuer URL
 
 `SPLIIT_MCP_OIDC_ISSUER` has to resolve to the **same URL** from two places: your
