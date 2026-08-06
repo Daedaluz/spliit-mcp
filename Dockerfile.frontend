@@ -1,5 +1,39 @@
-# Consumes a pre-built web/dist; run `npm --prefix web run build` first.
+# Multi-arch frontend image.
+#
+# The SPA is built here rather than consumed pre-built, so the image is
+# reproducible from a clean checkout and CI does not have to sequence a
+# separate npm step before the docker build. The build stage stays on the
+# native platform; the output is static files, so nothing is arch-specific.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+
+WORKDIR /app
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM nginx:alpine
-COPY web/dist /usr/share/nginx/html
+
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED
+
+# See Dockerfile.backend: image.source is what attaches the GHCR package to the
+# repository.
+LABEL org.opencontainers.image.source="https://github.com/daedaluz/spliit-mcp" \
+      org.opencontainers.image.url="https://github.com/daedaluz/spliit-mcp" \
+      org.opencontainers.image.documentation="https://github.com/daedaluz/spliit-mcp#readme" \
+      org.opencontainers.image.title="spliit-mcp-frontend" \
+      org.opencontainers.image.description="Config web UI for spliit-mcp" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
+
+COPY --from=build /app/dist /usr/share/nginx/html
 COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
+
+# Both are substituted into the template by the base image's entrypoint.
+# API_UPSTREAM must be set at run time; the port defaults to 80.
+ENV NGINX_PORT=80
 EXPOSE 80

@@ -1,0 +1,112 @@
+# Local development stack.
+#
+#   cp .env.example .env    # point it at your OIDC provider
+#   docker compose -f compose.dev.yml up --build
+#
+#   http://localhost:8080   spliit-mcp config UI (nginx, proxying the Go backend)
+#   http://localhost:3000   a real Spliit instance
+#
+# No identity provider is included: bring your own. Everything about it, and
+# about the ports and credentials below, is configurable through .env — see
+# .env.example. That keeps the stack usable with whatever you already run,
+# rather than pinning it to one vendor's container.
+#
+# The only hard requirement is that SPLIIT_MCP_OIDC_ISSUER resolves to the same
+# URL from your browser and from inside these containers, since the browser
+# follows redirects there and the backend fetches discovery and JWKS from it.
+# A publicly resolvable issuer satisfies that automatically; for a provider on
+# your own machine, see COMPOSE.md.
+name: ${COMPOSE_PROJECT:-spliit-mcp-dev}
+
+services:
+  # ------------------------------------------------------------------ spliit
+  spliit-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${SPLIIT_DB_PASSWORD:-spliit}
+      POSTGRES_DB: spliit
+    volumes:
+      - spliit-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  spliit:
+    # Spliit publishes no image, so build it from the upstream repo. Pinned to a
+    # ref rather than main so the stack does not drift underfoot; override with
+    # SPLIIT_REF to test against a different version.
+    build:
+      context: https://github.com/spliit-app/spliit.git#${SPLIIT_REF:-v1.19.0}
+    environment:
+      POSTGRES_PRISMA_URL: postgresql://postgres:${SPLIIT_DB_PASSWORD:-spliit}@spliit-db:5432/spliit
+      POSTGRES_URL_NON_POOLING: postgresql://postgres:${SPLIIT_DB_PASSWORD:-spliit}@spliit-db:5432/spliit
+      NEXT_PUBLIC_BASE_URL: http://localhost:${SPLIIT_PORT:-3000}
+    ports:
+      - "${SPLIIT_PORT:-3000}:3000"
+    depends_on:
+      spliit-db:
+        condition: service_healthy
+
+  # --------------------------------------------------------------- spliit-mcp
+  mcp-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${MCP_DB_PASSWORD:-spliitmcp}
+      POSTGRES_DB: spliitmcp
+    volumes:
+      - mcp-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    # Anything not set here can be added to .env as a SPLIIT_MCP_* variable.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SPLIIT_MCP_LISTEN: ":8080"
+      # The URL the browser and MCP clients actually use — the nginx front door,
+      # not this container. It builds the OIDC redirect URI and the audience
+      # that bearer tokens are checked against.
+      SPLIIT_MCP_PUBLIC_URL: ${SPLIIT_MCP_PUBLIC_URL:-http://localhost:8080}
+      # Empty: nginx serves the SPA in this split deployment.
+      SPLIIT_MCP_WEB_DIR: ""
+      SPLIIT_MCP_DATABASE_URL: postgres://postgres:${MCP_DB_PASSWORD:-spliitmcp}@mcp-db:5432/spliitmcp?sslmode=disable
+
+      # Seed each new user with the Spliit instance in this stack. Reached over
+      # the compose network, so it is the service name, not localhost.
+      SPLIIT_MCP_SPLIIT_DEFAULT_URL: ${SPLIIT_MCP_SPLIIT_DEFAULT_URL:-http://spliit:3000/api/trpc}
+      SPLIIT_MCP_SPLIIT_DEFAULT_NAME: ${SPLIIT_MCP_SPLIIT_DEFAULT_NAME:-local}
+
+      # Plain HTTP locally, so the session cookie must not demand Secure.
+      SPLIIT_MCP_SESSION_COOKIE_SECURE: ${SPLIIT_MCP_SESSION_COOKIE_SECURE:-false}
+    depends_on:
+      mcp-db:
+        condition: service_healthy
+    extra_hosts:
+      # Lets an identity provider running on the host be reached at the same
+      # host:port the browser uses. Harmless when the issuer is external.
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    environment:
+      API_UPSTREAM: http://backend:8080
+    ports:
+      - "${MCP_PORT:-8080}:80"
+    depends_on:
+      - backend
+
+volumes:
+  spliit-db:
+  mcp-db:

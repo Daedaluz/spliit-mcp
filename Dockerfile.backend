@@ -1,13 +1,48 @@
-FROM golang:1.26-alpine AS build
+# Multi-arch backend image.
+#
+# BUILDPLATFORM keeps the compile step on the native builder and cross-compiles
+# to TARGETARCH, which is far faster than emulating the toolchain under QEMU.
+# This works because the binary is pure Go: the SQLite driver is
+# modernc.org/sqlite, so CGO stays off and cross-compilation is trivial.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+ARG REVISION=unknown
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# CGO stays off: the SQLite driver is modernc.org/sqlite, which is pure Go.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/spliit-mcp ./cmd/spliit-mcp
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.revision=${REVISION}" \
+    -o /out/spliit-mcp ./cmd/spliit-mcp
 
 FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED
+
+# org.opencontainers.image.source is what links the GHCR package to the GitHub
+# repository, which is also what makes the package inherit the repo's
+# visibility and permissions. Without it the published package is orphaned.
+LABEL org.opencontainers.image.source="https://github.com/daedaluz/spliit-mcp" \
+      org.opencontainers.image.url="https://github.com/daedaluz/spliit-mcp" \
+      org.opencontainers.image.documentation="https://github.com/daedaluz/spliit-mcp#readme" \
+      org.opencontainers.image.title="spliit-mcp" \
+      org.opencontainers.image.description="MCP server for Spliit, with OIDC authorization and a config web UI" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
+
 COPY --from=build /out/spliit-mcp /spliit-mcp
+
 USER nonroot:nonroot
 EXPOSE 8080
-ENTRYPOINT ["/spliit-mcp", "serve"]
+ENTRYPOINT ["/spliit-mcp"]
+CMD ["serve"]

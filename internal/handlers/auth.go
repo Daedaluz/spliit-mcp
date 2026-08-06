@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/zitadel/oidc/v3/pkg/client/rp"
 	zoidc "github.com/zitadel/oidc/v3/pkg/oidc"
 
@@ -16,14 +17,17 @@ import (
 // sessionCookieName holds the config web UI session ID.
 const sessionCookieName = "spliit_mcp_session"
 
-type contextKey struct{ name string }
-
-var userContextKey = contextKey{"user"}
+// userContextKey is the gin context key holding the authenticated web user.
+const userContextKey = "spliit_mcp_user"
 
 // UserFromContext returns the authenticated web user, or nil.
-func UserFromContext(ctx context.Context) *store.User {
-	u, _ := ctx.Value(userContextKey).(*store.User)
-	return u
+func UserFromContext(c *gin.Context) *store.User {
+	value, ok := c.Get(userContextKey)
+	if !ok {
+		return nil
+	}
+	user, _ := value.(*store.User)
+	return user
 }
 
 // LoginHandler starts the authorization code + PKCE flow.
@@ -43,21 +47,26 @@ func (s *Server) CallbackHandler() http.HandlerFunc {
 		ctx := r.Context()
 		claims := appoidc.ClaimsFromIDToken(tokens.IDTokenClaims)
 
+		fail := func(op string, err error) {
+			s.log.Error(op, "error", err, "path", r.URL.Path)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+
 		user, err := s.store.UpsertUser(ctx, claims.Subject,
 			s.cfg.OIDC.Issuer, claims.Email, claims.DisplayName)
 		if err != nil {
-			s.serverError(w, r, "persist user", err)
+			fail("persist user", err)
 			return
 		}
 
 		if err := s.ensureDefaultServer(ctx, user.Sub); err != nil {
-			s.serverError(w, r, "seed default spliit server", err)
+			fail("seed default spliit server", err)
 			return
 		}
 
 		session, err := s.store.CreateSession(ctx, user.Sub, s.cfg.SessionTTL)
 		if err != nil {
-			s.serverError(w, r, "create session", err)
+			fail("create session", err)
 			return
 		}
 
@@ -94,58 +103,58 @@ func (s *Server) ensureDefaultServer(ctx context.Context, sub string) error {
 }
 
 // LogoutHandler ends the session and clears the cookie.
-func (s *Server) LogoutHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if cookie, err := r.Cookie(sessionCookieName); err == nil {
-			if err := s.store.DeleteSession(r.Context(), cookie.Value); err != nil {
-				s.log.Warn("delete session on logout", "error", err)
-			}
+func (s *Server) LogoutHandler(c *gin.Context) {
+	if cookie, err := c.Cookie(sessionCookieName); err == nil {
+		if err := s.store.DeleteSession(c.Request.Context(), cookie); err != nil {
+			s.log.Warn("delete session on logout", "error", err)
 		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     sessionCookieName,
-			Value:    "",
-			Path:     "/",
-			Expires:  time.Unix(0, 0),
-			MaxAge:   -1,
-			HttpOnly: true,
-			Secure:   s.cfg.SessionCookieSecure,
-			SameSite: http.SameSiteLaxMode,
-		})
-		w.WriteHeader(http.StatusNoContent)
 	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		Expires:  time.Unix(0, 0),
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.cfg.SessionCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+	c.Status(http.StatusNoContent)
 }
 
 // RequireSession rejects requests without a live config web UI session and
 // attaches the resolved user to the request context.
-func (s *Server) RequireSession(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(sessionCookieName)
+func (s *Server) RequireSession() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		cookie, err := c.Cookie(sessionCookieName)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "not signed in")
+			writeError(c, http.StatusUnauthorized, "not signed in")
 			return
 		}
 
-		session, err := s.store.GetSession(r.Context(), cookie.Value)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusUnauthorized, "session expired")
-				return
-			}
-			s.serverError(w, r, "load session", err)
-			return
-		}
+		ctx := c.Request.Context()
 
-		user, err := s.store.GetUser(r.Context(), session.UserSub)
+		session, err := s.store.GetSession(ctx, cookie)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusUnauthorized, "user no longer exists")
+				writeError(c, http.StatusUnauthorized, "session expired")
 				return
 			}
-			s.serverError(w, r, "load user", err)
+			s.serverError(c, "load session", err)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), userContextKey, user)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+		user, err := s.store.GetUser(ctx, session.UserSub)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(c, http.StatusUnauthorized, "user no longer exists")
+				return
+			}
+			s.serverError(c, "load user", err)
+			return
+		}
+
+		c.Set(userContextKey, user)
+		c.Next()
+	}
 }

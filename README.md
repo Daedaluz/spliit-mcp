@@ -58,12 +58,40 @@ make test           # go test ./... + SPA typecheck
 make test-postgres  # also runs the store tests against a throwaway Postgres
 ```
 
+### Local test stack
+
+`compose.dev.yml` runs a real Spliit instance alongside spliit-mcp and both
+databases. No identity provider is bundled — bring your own and configure it in
+`.env`, along with ports, passwords and the Spliit version:
+
+```sh
+cp .env.example .env
+docker compose -f compose.dev.yml up --build
+```
+
+See [COMPOSE.md](COMPOSE.md) for the walkthrough and the one constraint on the
+issuer URL.
+
+### Container images
+
+Published to GHCR for `linux/amd64` and `linux/arm64`:
+
+```
+ghcr.io/daedaluz/spliit-mcp             # API
+ghcr.io/daedaluz/spliit-mcp-frontend    # config UI (nginx)
+```
+
+```sh
+make docker         # build both, both architectures, without pushing
+make docker-push    # build and push
+```
+
 Two deployment shapes, as in `nextstop`:
 
 1. **Monolith** — the Go binary serves the API and the SPA when `web_dir` points
    at `web/dist`.
 2. **Split** — `Dockerfile.backend` (distroless) serves the API; `Dockerfile.frontend`
-   (nginx) serves `web/dist` and proxies `/api`, `/auth`, `/mcp` and
+   (nginx) builds and serves the SPA and proxies `/api`, `/auth`, `/mcp` and
    `/.well-known` to `$API_UPSTREAM`. Set `web_dir` empty in the backend.
 
 ## Using it

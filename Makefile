@@ -1,4 +1,5 @@
-.PHONY: dev backend frontend test build lint clean
+.PHONY: dev backend frontend test test-postgres build lint clean \
+	docker docker-push compose-up compose-down
 
 # Backend on :8080 + Vite on :5173 (proxying /api and /auth). Ctrl-C kills both.
 dev:
@@ -34,6 +35,39 @@ lint:
 build:
 	go build -o spliit-mcp ./cmd/spliit-mcp
 	npm --prefix web run build
+
+# Multi-arch images. The Go binary is pure Go (modernc SQLite, CGO off), so the
+# build stage stays on the native platform and cross-compiles — far faster than
+# emulating the toolchain under QEMU.
+PLATFORMS ?= linux/amd64,linux/arm64
+REGISTRY  ?= ghcr.io/daedaluz
+VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+REVISION  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+CREATED   ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+BUILD_ARGS = --build-arg VERSION=$(VERSION) \
+             --build-arg REVISION=$(REVISION) \
+             --build-arg CREATED=$(CREATED)
+
+# Builds without pushing, to check both architectures compile.
+docker:
+	docker buildx build --platform $(PLATFORMS) $(BUILD_ARGS) \
+		-f Dockerfile.backend -t $(REGISTRY)/spliit-mcp:$(VERSION) .
+	docker buildx build --platform $(PLATFORMS) $(BUILD_ARGS) \
+		-f Dockerfile.frontend -t $(REGISTRY)/spliit-mcp-frontend:$(VERSION) .
+
+# A multi-arch manifest cannot be loaded into the local daemon, so this pushes.
+docker-push:
+	docker buildx build --platform $(PLATFORMS) $(BUILD_ARGS) --push \
+		-f Dockerfile.backend -t $(REGISTRY)/spliit-mcp:$(VERSION) .
+	docker buildx build --platform $(PLATFORMS) $(BUILD_ARGS) --push \
+		-f Dockerfile.frontend -t $(REGISTRY)/spliit-mcp-frontend:$(VERSION) .
+
+compose-up:
+	docker compose -f compose.dev.yml up --build
+
+compose-down:
+	docker compose -f compose.dev.yml down
 
 clean:
 	rm -f spliit-mcp spliit-mcp.db

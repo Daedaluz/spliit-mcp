@@ -20,15 +20,15 @@ import (
 	"github.com/daedaluz/spliit-mcp/internal/store"
 )
 
-// Version is reported to MCP clients during initialization.
-const Version = "0.1.0"
-
 // Deps are the collaborators the tool handlers need.
 type Deps struct {
 	Config  *config.Config
 	Store   *store.Store
 	Clients *spliit.Clients
 	Log     *slog.Logger
+	// Version is reported to MCP clients during initialization. Defaults to
+	// "dev" when the binary was built without build metadata.
+	Version string
 }
 
 // resolved is a group plus everything needed to call Spliit for it.
@@ -56,10 +56,15 @@ func (r resolved) me() (string, error) {
 
 // NewServer builds the MCP server and registers every tool.
 func NewServer(deps Deps) *mcp.Server {
+	version := deps.Version
+	if version == "" {
+		version = "dev"
+	}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "spliit-mcp",
 		Title:   "Spliit",
-		Version: Version,
+		Version: version,
 		Description: "Read and record shared expenses in Spliit groups. " +
 			"Groups are made available through the spliit-mcp config page.",
 	}, &mcp.ServerOptions{

@@ -26,6 +26,12 @@ import (
 	"github.com/daedaluz/spliit-mcp/internal/store"
 )
 
+// Build metadata, set via -ldflags at build time.
+var (
+	version  = "dev"
+	revision = "unknown"
+)
+
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		os.Exit(1)
@@ -68,7 +74,15 @@ func rootCmd() *cobra.Command {
 		},
 	}
 
-	root.AddCommand(serve, migrate)
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the build version",
+		Run: func(cmd *cobra.Command, _ []string) {
+			cmd.Printf("spliit-mcp %s (%s)\n", version, revision)
+		},
+	}
+
+	root.AddCommand(serve, migrate, versionCmd)
 	return root
 }
 
@@ -103,7 +117,7 @@ func runServe(ctx context.Context, configPath string) error {
 	clients := spliit.NewClients(cfg.Spliit.Timeout)
 
 	mcpServer := appmcp.NewServer(appmcp.Deps{
-		Config: cfg, Store: st, Clients: clients, Log: log,
+		Config: cfg, Store: st, Clients: clients, Log: log, Version: version,
 	})
 
 	// The MCP endpoint is an OAuth 2.0 protected resource: the bearer token is

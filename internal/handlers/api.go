@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/gin-gonic/gin"
 
 	"github.com/daedaluz/spliit-mcp/internal/spliit"
 	"github.com/daedaluz/spliit-mcp/internal/store"
@@ -14,9 +14,9 @@ import (
 
 // GetMe returns the signed-in user's identity and the display name used to
 // recognise them among group participants.
-func (s *Server) GetMe(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{
+func (s *Server) GetMe(c *gin.Context) {
+	user := UserFromContext(c)
+	c.JSON(http.StatusOK, gin.H{
 		"sub":          user.Sub,
 		"email":        user.Email,
 		"display_name": user.DisplayName,
@@ -26,42 +26,42 @@ func (s *Server) GetMe(w http.ResponseWriter, r *http.Request) {
 // UpdateMe changes the display name. This is the "who you are" half of the
 // config page: it is the default used to find your participant when adding a
 // group.
-func (s *Server) UpdateMe(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) UpdateMe(c *gin.Context) {
+	user := UserFromContext(c)
 
 	var body struct {
 		DisplayName string `json:"display_name"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	name := strings.TrimSpace(body.DisplayName)
 	if name == "" {
-		writeError(w, http.StatusBadRequest, "display_name must not be empty")
+		writeError(c, http.StatusBadRequest, "display_name must not be empty")
 		return
 	}
 
-	if err := s.store.SetDisplayName(r.Context(), user.Sub, name); err != nil {
-		s.serverError(w, r, "set display name", err)
+	if err := s.store.SetDisplayName(c.Request.Context(), user.Sub, name); err != nil {
+		s.serverError(c, "set display name", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	c.JSON(http.StatusOK, gin.H{
 		"sub": user.Sub, "email": user.Email, "display_name": name,
 	})
 }
 
 // ListServers returns the user's registered Spliit instances.
-func (s *Server) ListServers(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) ListServers(c *gin.Context) {
+	user := UserFromContext(c)
 
-	servers, err := s.store.ListServers(r.Context(), user.Sub)
+	servers, err := s.store.ListServers(c.Request.Context(), user.Sub)
 	if err != nil {
-		s.serverError(w, r, "list servers", err)
+		s.serverError(c, "list servers", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"servers": servers})
+	c.JSON(http.StatusOK, gin.H{"servers": servers})
 }
 
 type serverBody struct {
@@ -95,90 +95,89 @@ func (b *serverBody) validate() error {
 }
 
 // CreateServer registers another Spliit instance.
-func (s *Server) CreateServer(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) CreateServer(c *gin.Context) {
+	user := UserFromContext(c)
 
 	var body serverBody
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if err := body.validate(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	server, err := s.store.CreateServer(r.Context(), user.Sub, body.Name, body.BaseURL)
+	server, err := s.store.CreateServer(c.Request.Context(), user.Sub, body.Name, body.BaseURL)
 	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusConflict, "a server with that name already exists")
+		writeError(c, http.StatusConflict, "a server with that name already exists")
 		return
 	}
 	if err != nil {
-		s.serverError(w, r, "create server", err)
+		s.serverError(c, "create server", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, server)
+	c.JSON(http.StatusCreated, server)
 }
 
 // UpdateServer renames a server or repoints its URL.
-func (s *Server) UpdateServer(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) UpdateServer(c *gin.Context) {
+	user := UserFromContext(c)
 
 	var body serverBody
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if err := body.validate(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	id := chi.URLParam(r, "id")
-	err := s.store.UpdateServer(r.Context(), user.Sub, id, body.Name, body.BaseURL)
+	ctx, id := c.Request.Context(), c.Param("id")
+	err := s.store.UpdateServer(ctx, user.Sub, id, body.Name, body.BaseURL)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		writeError(w, http.StatusNotFound, "server not found")
+		writeError(c, http.StatusNotFound, "server not found")
 	case errors.Is(err, store.ErrConflict):
-		writeError(w, http.StatusConflict, "a server with that name already exists")
+		writeError(c, http.StatusConflict, "a server with that name already exists")
 	case err != nil:
-		s.serverError(w, r, "update server", err)
+		s.serverError(c, "update server", err)
 	default:
-		server, err := s.store.GetServer(r.Context(), user.Sub, id)
+		server, err := s.store.GetServer(ctx, user.Sub, id)
 		if err != nil {
-			s.serverError(w, r, "reload server", err)
+			s.serverError(c, "reload server", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, server)
+		c.JSON(http.StatusOK, server)
 	}
 }
 
 // DeleteServer removes a Spliit instance. Groups still pointing at it must be
 // removed first; silently cascading would drop group IDs the user cannot
 // recover, since Spliit has no way to list them.
-func (s *Server) DeleteServer(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
-	id := chi.URLParam(r, "id")
+func (s *Server) DeleteServer(c *gin.Context) {
+	user := UserFromContext(c)
+	ctx, id := c.Request.Context(), c.Param("id")
 
-	count, err := s.store.CountGroupsForServer(r.Context(), user.Sub, id)
+	count, err := s.store.CountGroupsForServer(ctx, user.Sub, id)
 	if err != nil {
-		s.serverError(w, r, "count groups for server", err)
+		s.serverError(c, "count groups for server", err)
 		return
 	}
 	if count > 0 {
-		writeError(w, http.StatusConflict,
-			"remove this server's groups before deleting it")
+		writeError(c, http.StatusConflict, "remove this server's groups before deleting it")
 		return
 	}
 
-	err = s.store.DeleteServer(r.Context(), user.Sub, id)
+	err = s.store.DeleteServer(ctx, user.Sub, id)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		writeError(w, http.StatusNotFound, "server not found")
+		writeError(c, http.StatusNotFound, "server not found")
 	case err != nil:
-		s.serverError(w, r, "delete server", err)
+		s.serverError(c, "delete server", err)
 	default:
-		w.WriteHeader(http.StatusNoContent)
+		c.Status(http.StatusNoContent)
 	}
 }
 
@@ -191,17 +190,18 @@ type groupView struct {
 }
 
 // ListGroups returns every group the user has made available.
-func (s *Server) ListGroups(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) ListGroups(c *gin.Context) {
+	user := UserFromContext(c)
+	ctx := c.Request.Context()
 
-	groups, err := s.store.ListGroups(r.Context(), user.Sub)
+	groups, err := s.store.ListGroups(ctx, user.Sub)
 	if err != nil {
-		s.serverError(w, r, "list groups", err)
+		s.serverError(c, "list groups", err)
 		return
 	}
-	servers, err := s.store.ListServers(r.Context(), user.Sub)
+	servers, err := s.store.ListServers(ctx, user.Sub)
 	if err != nil {
-		s.serverError(w, r, "list servers", err)
+		s.serverError(c, "list servers", err)
 		return
 	}
 
@@ -218,7 +218,7 @@ func (s *Server) ListGroups(w http.ResponseWriter, r *http.Request) {
 			NeedsSetup: g.ParticipantID == "",
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"groups": views})
+	c.JSON(http.StatusOK, gin.H{"groups": views})
 }
 
 // PreviewGroup fetches a group from Spliit without storing anything, so the
@@ -226,39 +226,40 @@ func (s *Server) ListGroups(w http.ResponseWriter, r *http.Request) {
 //
 // The suggestion is a case-insensitive match on the user's display name. When
 // it does not hit exactly one participant the UI must ask the user to pick.
-func (s *Server) PreviewGroup(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) PreviewGroup(c *gin.Context) {
+	user := UserFromContext(c)
+	ctx := c.Request.Context()
 
 	var body struct {
 		ServerID string `json:"server_id"`
 		GroupID  string `json:"group_id"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	body.GroupID = extractGroupID(strings.TrimSpace(body.GroupID))
 	if body.GroupID == "" {
-		writeError(w, http.StatusBadRequest, "group_id must not be empty")
+		writeError(c, http.StatusBadRequest, "group_id must not be empty")
 		return
 	}
 
-	server, err := s.store.GetServer(r.Context(), user.Sub, body.ServerID)
+	server, err := s.store.GetServer(ctx, user.Sub, body.ServerID)
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "server not found")
+		writeError(c, http.StatusNotFound, "server not found")
 		return
 	}
 	if err != nil {
-		s.serverError(w, r, "load server", err)
+		s.serverError(c, "load server", err)
 		return
 	}
 
-	group, err := s.clients.GetGroup(r.Context(), server.BaseURL, body.GroupID)
+	group, err := s.clients.GetGroup(ctx, server.BaseURL, body.GroupID)
 	if err != nil {
 		// This is an upstream lookup of user-supplied input; a bad group ID is
 		// a client error, and the message is worth showing.
-		writeError(w, http.StatusBadGateway, "could not fetch that group: "+err.Error())
+		writeError(c, http.StatusBadGateway, "could not fetch that group: "+err.Error())
 		return
 	}
 
@@ -284,7 +285,7 @@ func (s *Server) PreviewGroup(w http.ResponseWriter, r *http.Request) {
 		suggested = ""
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	c.JSON(http.StatusOK, gin.H{
 		"group_id":                body.GroupID,
 		"name":                    group.Name,
 		"currency":                group.Currency,
@@ -296,8 +297,9 @@ func (s *Server) PreviewGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // CreateGroup makes a group available to the user's MCP session.
-func (s *Server) CreateGroup(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) CreateGroup(c *gin.Context) {
+	user := UserFromContext(c)
+	ctx := c.Request.Context()
 
 	var body struct {
 		ServerID      string `json:"server_id"`
@@ -305,31 +307,31 @@ func (s *Server) CreateGroup(w http.ResponseWriter, r *http.Request) {
 		Alias         string `json:"alias"`
 		ParticipantID string `json:"participant_id"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	body.GroupID = extractGroupID(strings.TrimSpace(body.GroupID))
 	body.Alias = strings.TrimSpace(body.Alias)
 	if body.GroupID == "" {
-		writeError(w, http.StatusBadRequest, "group_id must not be empty")
+		writeError(c, http.StatusBadRequest, "group_id must not be empty")
 		return
 	}
 
-	server, err := s.store.GetServer(r.Context(), user.Sub, body.ServerID)
+	server, err := s.store.GetServer(ctx, user.Sub, body.ServerID)
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "server not found")
+		writeError(c, http.StatusNotFound, "server not found")
 		return
 	}
 	if err != nil {
-		s.serverError(w, r, "load server", err)
+		s.serverError(c, "load server", err)
 		return
 	}
 
-	group, err := s.clients.GetGroup(r.Context(), server.BaseURL, body.GroupID)
+	group, err := s.clients.GetGroup(ctx, server.BaseURL, body.GroupID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "could not fetch that group: "+err.Error())
+		writeError(c, http.StatusBadGateway, "could not fetch that group: "+err.Error())
 		return
 	}
 
@@ -337,8 +339,7 @@ func (s *Server) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	// would fail with a confusing upstream error instead of a clear one here.
 	participant := spliit.FindParticipant(group, body.ParticipantID)
 	if body.ParticipantID != "" && participant == nil {
-		writeError(w, http.StatusBadRequest,
-			"that participant does not exist in this group")
+		writeError(c, http.StatusBadRequest, "that participant does not exist in this group")
 		return
 	}
 
@@ -358,66 +359,65 @@ func (s *Server) CreateGroup(w http.ResponseWriter, r *http.Request) {
 		row.ParticipantID, row.ParticipantName = participant.ID, participant.Name
 	}
 
-	created, err := s.store.CreateGroup(r.Context(), row)
+	created, err := s.store.CreateGroup(ctx, row)
 	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusConflict,
-			"that group is already registered, or the alias is taken")
+		writeError(c, http.StatusConflict, "that group is already registered, or the alias is taken")
 		return
 	}
 	if err != nil {
-		s.serverError(w, r, "create group", err)
+		s.serverError(c, "create group", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	c.JSON(http.StatusCreated, created)
 }
 
 // UpdateGroup changes a group's alias or re-pins which participant is "you".
-func (s *Server) UpdateGroup(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
-	id := chi.URLParam(r, "id")
+func (s *Server) UpdateGroup(c *gin.Context) {
+	user := UserFromContext(c)
+	ctx, id := c.Request.Context(), c.Param("id")
 
 	var body struct {
 		Alias         *string `json:"alias"`
 		ParticipantID *string `json:"participant_id"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := bindJSON(c, &body); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	existing, err := s.store.GetGroup(r.Context(), user.Sub, id)
+	existing, err := s.store.GetGroup(ctx, user.Sub, id)
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "group not found")
+		writeError(c, http.StatusNotFound, "group not found")
 		return
 	}
 	if err != nil {
-		s.serverError(w, r, "load group", err)
+		s.serverError(c, "load group", err)
 		return
 	}
 
 	if body.Alias != nil {
 		alias := strings.TrimSpace(*body.Alias)
 		if alias == "" {
-			writeError(w, http.StatusBadRequest, "alias must not be empty")
+			writeError(c, http.StatusBadRequest, "alias must not be empty")
 			return
 		}
 		existing.Alias = alias
 	}
 
 	if body.ParticipantID != nil {
-		server, err := s.store.GetServer(r.Context(), user.Sub, existing.ServerID)
+		server, err := s.store.GetServer(ctx, user.Sub, existing.ServerID)
 		if err != nil {
-			s.serverError(w, r, "load server", err)
+			s.serverError(c, "load server", err)
 			return
 		}
-		group, err := s.clients.GetGroup(r.Context(), server.BaseURL, existing.SpliitGroupID)
+		group, err := s.clients.GetGroup(ctx, server.BaseURL, existing.SpliitGroupID)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, "could not fetch that group: "+err.Error())
+			writeError(c, http.StatusBadGateway, "could not fetch that group: "+err.Error())
 			return
 		}
 		participant := spliit.FindParticipant(group, *body.ParticipantID)
 		if participant == nil {
-			writeError(w, http.StatusBadRequest, "that participant does not exist in this group")
+			writeError(c, http.StatusBadRequest, "that participant does not exist in this group")
 			return
 		}
 		existing.ParticipantID, existing.ParticipantName = participant.ID, participant.Name
@@ -425,29 +425,29 @@ func (s *Server) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		existing.GroupName, existing.Currency = group.Name, group.Currency
 	}
 
-	if err := s.store.UpdateGroup(r.Context(), existing); err != nil {
+	if err := s.store.UpdateGroup(ctx, existing); err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusConflict, "that alias is already taken")
+			writeError(c, http.StatusConflict, "that alias is already taken")
 			return
 		}
-		s.serverError(w, r, "update group", err)
+		s.serverError(c, "update group", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, existing)
+	c.JSON(http.StatusOK, existing)
 }
 
 // DeleteGroup unlinks a group. Nothing is deleted in Spliit itself.
-func (s *Server) DeleteGroup(w http.ResponseWriter, r *http.Request) {
-	user := UserFromContext(r.Context())
+func (s *Server) DeleteGroup(c *gin.Context) {
+	user := UserFromContext(c)
 
-	err := s.store.DeleteGroup(r.Context(), user.Sub, chi.URLParam(r, "id"))
+	err := s.store.DeleteGroup(c.Request.Context(), user.Sub, c.Param("id"))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		writeError(w, http.StatusNotFound, "group not found")
+		writeError(c, http.StatusNotFound, "group not found")
 	case err != nil:
-		s.serverError(w, r, "delete group", err)
+		s.serverError(c, "delete group", err)
 	default:
-		w.WriteHeader(http.StatusNoContent)
+		c.Status(http.StatusNoContent)
 	}
 }
 
