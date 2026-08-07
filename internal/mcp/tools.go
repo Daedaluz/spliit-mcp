@@ -1426,7 +1426,7 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 	})
 	if errors.Is(err, store.ErrConflict) {
 		return toolError[joinGroupOutput](fmt.Errorf(
-			"you have already joined that group, or the alias %q is taken", alias))
+			"you have already joined that group, or your alias %q is taken", alias))
 	}
 	if err != nil {
 		return toolError[joinGroupOutput](err)

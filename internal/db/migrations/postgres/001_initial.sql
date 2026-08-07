@@ -37,8 +37,9 @@ CREATE TABLE groups (
     currency         TEXT        NOT NULL DEFAULT '',
     created_at       TIMESTAMPTZ NOT NULL,
     updated_at       TIMESTAMPTZ NOT NULL,
-    -- The same group ID on two instances is two different groups.
-    UNIQUE (base_url, spliit_group_id),
+    -- Per user, and per instance: registering a group is something each user
+    -- does for themselves, and the same ID on two instances is two groups.
+    UNIQUE (user_sub, base_url, spliit_group_id),
     -- Aliases are unique per user across instances, so MCP tools take a bare name.
     UNIQUE (user_sub, alias)
 );

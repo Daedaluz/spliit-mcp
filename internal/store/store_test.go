@@ -134,9 +134,68 @@ func TestGroupConstraints(t *testing.T) {
 		if err := mk(homeURL, "grp-1", "trip-home"); err != nil {
 			t.Errorf("same group id on another instance should be allowed, got %v", err)
 		}
-		// The same group ID on the same instance is a duplicate.
+		// The same user registering the same group twice is still a duplicate.
 		if err := mk(appURL, "grp-1", "trip-again"); !errors.Is(err, store.ErrConflict) {
-			t.Errorf("duplicate group on one instance: err = %v, want ErrConflict", err)
+			t.Errorf("duplicate group for one user: err = %v, want ErrConflict", err)
+		}
+	})
+}
+
+// Registering a group is per user: two people may each make the same Spliit
+// group available to themselves. This failed in production because the
+// uniqueness constraint omitted user_sub, so the first person to join a group
+// locked everyone else out of it.
+func TestTwoUsersCanRegisterTheSameGroup(t *testing.T) {
+	eachEngine(t, func(t *testing.T, s *store.Store) {
+		ctx := context.Background()
+		const baseURL = "https://split.example.com/api/trpc"
+
+		for _, sub := range []string{"alice", "bob"} {
+			if _, err := s.UpsertUser(ctx, sub, "https://issuer", "", sub); err != nil {
+				t.Fatalf("user %s: %v", sub, err)
+			}
+		}
+
+		if _, err := s.CreateGroup(ctx, &store.Group{
+			UserSub: "alice", BaseURL: baseURL, SpliitGroupID: "shared",
+			Alias: "trip", ParticipantID: "p-alice", ParticipantName: "Alice",
+		}); err != nil {
+			t.Fatalf("alice joining: %v", err)
+		}
+
+		// Bob joining the very same group must succeed, with his own
+		// participant and his own alias.
+		if _, err := s.CreateGroup(ctx, &store.Group{
+			UserSub: "bob", BaseURL: baseURL, SpliitGroupID: "shared",
+			Alias: "trip", ParticipantID: "p-bob", ParticipantName: "Bob",
+		}); err != nil {
+			t.Fatalf("bob joining the same group: %v", err)
+		}
+
+		// Each resolves to their own row.
+		for _, tc := range []struct{ sub, participant string }{
+			{"alice", "p-alice"}, {"bob", "p-bob"},
+		} {
+			got, err := s.ResolveGroup(ctx, tc.sub, "trip")
+			if err != nil {
+				t.Fatalf("resolve for %s: %v", tc.sub, err)
+			}
+			if got.ParticipantID != tc.participant {
+				t.Errorf("%s resolved to participant %q, want %q",
+					tc.sub, got.ParticipantID, tc.participant)
+			}
+		}
+
+		// And one leaving must not affect the other.
+		alices, err := s.ResolveGroup(ctx, "alice", "trip")
+		if err != nil {
+			t.Fatalf("resolve alice: %v", err)
+		}
+		if err := s.DeleteGroup(ctx, "alice", alices.ID); err != nil {
+			t.Fatalf("alice leaving: %v", err)
+		}
+		if _, err := s.ResolveGroup(ctx, "bob", "trip"); err != nil {
+			t.Errorf("bob lost his group when alice left: %v", err)
 		}
 	})
 }
