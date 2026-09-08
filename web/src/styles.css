@@ -332,3 +332,7 @@ input.narrow {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+.copy-note {
+  margin: 0.35rem 0 0;
+}

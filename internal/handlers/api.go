@@ -87,7 +87,10 @@ func (s *Server) resolveBaseURL(explicit, groupRef string) string {
 // participant has gone missing.
 type groupView struct {
 	store.Group
-	Host       string `json:"host"`
+	Host string `json:"host"`
+	// URL is the browser link to the group, so the page can offer it for
+	// copying without rebuilding DeriveBaseURL's inverse in the client.
+	URL        string `json:"url"`
 	NeedsSetup bool   `json:"needs_setup"`
 }
 
@@ -106,6 +109,7 @@ func (s *Server) ListGroups(c *gin.Context) {
 		views = append(views, groupView{
 			Group:      g,
 			Host:       spliit.HostOf(g.BaseURL),
+			URL:        spliit.WebURL(g.BaseURL, g.SpliitGroupID),
 			NeedsSetup: g.ParticipantID == "",
 		})
 	}

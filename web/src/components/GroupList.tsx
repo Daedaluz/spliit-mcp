@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { AppData } from '../App'
 import { api, Group, Participant } from '../api'
+import { CopyField } from './CopyField'
 
 export function GroupList({ data }: { data: AppData }) {
   return (
@@ -18,6 +19,7 @@ function GroupRow({ group, data }: { group: Group; data: AppData }) {
   const [alias, setAlias] = useState(group.alias)
   const [mode, setMode] = useState<'view' | 'rename' | 'participant'>('view')
   const [participants, setParticipants] = useState<Participant[]>([])
+  const [showLink, setShowLink] = useState(false)
   const [busy, setBusy] = useState(false)
 
   async function run(action: () => Promise<unknown>) {
@@ -111,6 +113,17 @@ function GroupRow({ group, data }: { group: Group; data: AppData }) {
                 <span className="warn">no participant set as you</span>
               )}
             </div>
+            {showLink && (
+              <>
+                <CopyField label="Group link" value={group.url} />
+                <p className="muted small copy-note">
+                  <a href={group.url} target="_blank" rel="noreferrer">
+                    Open in Spliit
+                  </a>{' '}
+                  — anyone with this link can see and change the group.
+                </p>
+              </>
+            )}
           </>
         )}
       </div>
@@ -119,6 +132,9 @@ function GroupRow({ group, data }: { group: Group; data: AppData }) {
         <div className="list-actions">
           <button className="button" onClick={openParticipantPicker} disabled={busy}>
             {group.participant_name ? 'Change you' : 'Set you'}
+          </button>
+          <button className="button" onClick={() => setShowLink((v) => !v)} disabled={busy}>
+            {showLink ? 'Hide link' : 'Link'}
           </button>
           <button className="button" onClick={() => setMode('rename')} disabled={busy}>
             Rename

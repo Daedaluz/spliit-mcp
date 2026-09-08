@@ -25,6 +25,8 @@ export interface Group {
   base_url: string
   /** Display form of base_url, e.g. "spliit.app". */
   host: string
+  /** Browser link to the group, built by the server from base_url. */
+  url: string
   spliit_group_id: string
   alias: string
   participant_id: string
