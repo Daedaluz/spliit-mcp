@@ -65,8 +65,11 @@ func (t *tools) register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "update_expense",
 		Title: "Update an expense",
-		Description: "Change an existing expense. Every field is replaced, so unspecified fields " +
-			"fall back to the current value.",
+		Description: "Change an existing expense. Pass only the fields that should change; " +
+			"everything else, including who paid, who shares it and how it is split, is kept " +
+			"exactly as it is. To add receipt details, pass just notes (or title). Pass paid_for " +
+			"only when the split itself should change — it resets the split to even shares " +
+			"between the named participants.",
 	}, t.updateExpense)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -99,6 +102,13 @@ func (t *tools) register(s *mcp.Server) {
 		Description: "Create a new Spliit group and join it so the other tools can use it. " +
 			"You are added as a participant automatically.",
 	}, t.createGroup)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "update_group",
+		Title: "Update a group",
+		Description: "Rename a group, change its currency, or add, rename and remove participants. " +
+			"Only the fields you pass change. A participant with expenses cannot be removed.",
+	}, t.updateGroup)
 
 	// Group management. Spliit has no notion of membership, so "joining" means
 	// registering a group ID here so the other tools can reach it.
@@ -687,6 +697,12 @@ type expenseWriteInput struct {
 	// IsReimbursement marks a payment settling an existing debt rather than a
 	// new shared cost.
 	IsReimbursement bool `json:"is_reimbursement,omitempty" jsonschema:"True if this is a repayment settling a debt"`
+
+	// keepSplit, when set, is the existing expense whose split (participants,
+	// shares and mode) must be sent back unchanged. update_expense sets it when
+	// the caller did not pass paid_for. Unexported, so it never reaches the
+	// model's schema.
+	keepSplit *model.Expense
 }
 
 type createExpenseOutput struct {
@@ -748,7 +764,7 @@ type updateExpenseInput struct {
 	PaidFor         []string `json:"paid_for,omitempty" jsonschema:"New sharers' participant names (unchanged if omitted)"`
 	CategoryID      int      `json:"category_id,omitempty" jsonschema:"New category ID (unchanged if omitted)"`
 	Notes           string   `json:"notes,omitempty" jsonschema:"New notes (unchanged if omitted)"`
-	IsReimbursement bool     `json:"is_reimbursement,omitempty" jsonschema:"True if this is a repayment settling a debt"`
+	IsReimbursement *bool    `json:"is_reimbursement,omitempty" jsonschema:"Mark as a repayment settling a debt (unchanged if omitted)"`
 }
 
 // asWriteInput reshapes an update into the common form-building input.
@@ -762,7 +778,7 @@ func (in updateExpenseInput) asWriteInput() expenseWriteInput {
 		PaidFor:         in.PaidFor,
 		CategoryID:      in.CategoryID,
 		Notes:           in.Notes,
-		IsReimbursement: in.IsReimbursement,
+		IsReimbursement: in.IsReimbursement != nil && *in.IsReimbursement,
 	}
 }
 
@@ -788,7 +804,7 @@ func (t *tools) updateExpense(ctx context.Context, req *mcp.CallToolRequest, in 
 		return toolError[createExpenseOutput](err)
 	}
 	write := in.asWriteInput()
-	applyExpenseDefaults(&write, current)
+	applyExpenseDefaults(&write, current, in.IsReimbursement == nil)
 
 	form, names, err := t.buildExpenseForm(write, group, r)
 	if err != nil {
@@ -805,13 +821,24 @@ func (t *tools) updateExpense(ctx context.Context, req *mcp.CallToolRequest, in 
 		Amount: form.Amount.AsDecimal().StringFixed(2),
 		PaidBy: names.paidBy, PaidFor: names.paidFor,
 	}
-	return toolResult(fmt.Sprintf("Updated %q to %s %s.",
-		form.Title, out.Amount, r.group.Currency), out)
+	split := "split unchanged"
+	if write.keepSplit == nil {
+		split = "now split evenly between " + strings.Join(names.paidFor, ", ")
+	}
+	return toolResult(fmt.Sprintf("Updated %q to %s %s, paid by %s, %s.",
+		form.Title, out.Amount, r.group.Currency, names.paidBy, split), out)
 }
 
 // applyExpenseDefaults fills unset input fields from the existing expense, so a
 // partial update does not silently blank the rest of it.
-func applyExpenseDefaults(in *expenseWriteInput, current *model.Expense) {
+//
+// The split is the subtle part. Spliit's expense payload carries participant
+// IDs, shares and a split mode, and the nested participant objects are not
+// guaranteed to be present; re-deriving names from them and sending the result
+// through the even-split path would flatten by-share and by-amount expenses,
+// and an empty name list would fall back to "everyone". So when the caller did
+// not pass paid_for, the existing split is carried over verbatim instead.
+func applyExpenseDefaults(in *expenseWriteInput, current *model.Expense, keepReimbursement bool) {
 	if in.Title == "" {
 		in.Title = current.Title
 	}
@@ -825,11 +852,10 @@ func applyExpenseDefaults(in *expenseWriteInput, current *model.Expense) {
 		in.PaidBy = current.PaidBy.Name
 	}
 	if len(in.PaidFor) == 0 {
-		for _, pf := range current.PaidFor {
-			if pf != nil && pf.Participant != nil {
-				in.PaidFor = append(in.PaidFor, pf.Participant.Name)
-			}
-		}
+		in.keepSplit = current
+	}
+	if keepReimbursement {
+		in.IsReimbursement = current.IsReimbursement
 	}
 	if in.CategoryID == 0 {
 		in.CategoryID = current.CategoryID
@@ -897,9 +923,26 @@ func (t *tools) buildExpenseForm(in expenseWriteInput, group *model.Group, r res
 		}
 	}
 
-	// Who shares it: named participants, otherwise everyone.
+	// Who shares it: the existing split when updating without paid_for, else
+	// named participants, else everyone.
+	splitMode := model.SplitModeEvenly
 	paidFor := make([]shape.ModifyExpenseFormPaidFor, 0, len(group.Participants))
-	if len(in.PaidFor) > 0 {
+	if in.keepSplit != nil {
+		if in.keepSplit.SplitMode != "" {
+			splitMode = in.keepSplit.SplitMode
+		}
+		for _, pf := range in.keepSplit.PaidFor {
+			if pf == nil {
+				continue
+			}
+			paidFor = append(paidFor, shape.ModifyExpenseFormPaidFor{Participant: pf.ParticipantID, Shares: int(pf.Shares)})
+			if p := spliit.FindParticipant(group, pf.ParticipantID); p != nil {
+				names.paidFor = append(names.paidFor, p.Name)
+			} else {
+				names.paidFor = append(names.paidFor, pf.ParticipantID)
+			}
+		}
+	} else if len(in.PaidFor) > 0 {
 		for _, name := range in.PaidFor {
 			p, err := findByName(group, name)
 			if err != nil {
@@ -928,7 +971,7 @@ func (t *tools) buildExpenseForm(in expenseWriteInput, group *model.Group, r res
 		Amount:          spliit.ToAmount(amount),
 		PaidBy:          payerID,
 		PaidFor:         paidFor,
-		SplitMode:       model.SplitModeEvenly,
+		SplitMode:       splitMode,
 		IsReimbursement: in.IsReimbursement,
 		RecurrenceRule:  model.RecurrenceRuleNone,
 	}
@@ -1522,6 +1565,195 @@ func (t *tools) setActiveParticipant(ctx context.Context, req *mcp.CallToolReque
 	return toolResult(
 		fmt.Sprintf("You are now %s in %q.", participant.Name, r.group.Alias),
 		setActiveParticipantOutput{Alias: r.group.Alias, YouAre: participant.Name})
+}
+
+// ---------------------------------------------------------------------------
+// update_group
+
+type renameParticipant struct {
+	From string `json:"from" jsonschema:"Current participant name"`
+	To   string `json:"to" jsonschema:"New participant name"`
+}
+
+type updateGroupInput struct {
+	groupArg
+	Name     string `json:"name,omitempty" jsonschema:"New group name"`
+	Currency string `json:"currency,omitempty" jsonschema:"New currency symbol or code, e.g. SEK"`
+	// Participant edits are expressed as deltas; Spliit itself takes the full
+	// list, so the handler merges these into what the group currently has.
+	Add    []string            `json:"add_participants,omitempty" jsonschema:"Names of participants to add"`
+	Remove []string            `json:"remove_participants,omitempty" jsonschema:"Names of participants to remove; only possible when they have no expenses"`
+	Rename []renameParticipant `json:"rename_participants,omitempty" jsonschema:"Participants to rename, keeping their expenses"`
+}
+
+type updateGroupOutput struct {
+	Alias        string   `json:"alias"`
+	Name         string   `json:"name"`
+	Currency     string   `json:"currency"`
+	YouAre       string   `json:"you_are,omitempty"`
+	Participants []string `json:"participants"`
+}
+
+// updateGroup edits a group in Spliit. Spliit replaces the participant list
+// wholesale, keyed by ID: an entry with an ID is kept (and possibly renamed),
+// an entry without one is created, and anything missing is deleted. Passing
+// IDs through is what keeps renames from silently re-creating a participant
+// and orphaning their expenses.
+func (t *tools) updateGroup(ctx context.Context, req *mcp.CallToolRequest, in updateGroupInput) (*mcp.CallToolResult, updateGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+	r, err := t.resolve(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+	if strings.TrimSpace(in.Name) == "" && strings.TrimSpace(in.Currency) == "" &&
+		len(in.Add) == 0 && len(in.Remove) == 0 && len(in.Rename) == 0 {
+		return toolError[updateGroupOutput](fmt.Errorf(
+			"nothing to change: pass name, currency, add_participants, remove_participants or rename_participants"))
+	}
+
+	group, withExpenses, err := t.deps.Clients.GetGroupDetails(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+
+	form, changes, err := buildGroupForm(in, group, withExpenses, r.group.ParticipantID)
+	if err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+
+	me := participantOrNil(r.group.ParticipantID)
+	if err := t.deps.Clients.UpdateGroup(ctx, r.baseURL(), r.spliitID(), form, me); err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+
+	// Read back rather than trusting the form: new participants have IDs now,
+	// and the stored copy of the name and currency should follow Spliit.
+	updated, err := t.deps.Clients.GetGroup(ctx, r.baseURL(), r.spliitID())
+	if err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+	r.group.GroupName, r.group.Currency = updated.Name, updated.Currency
+	if p := spliit.FindParticipant(updated, r.group.ParticipantID); p != nil {
+		r.group.ParticipantName = p.Name
+	}
+	if err := t.deps.Store.UpdateGroup(ctx, r.group); err != nil {
+		return toolError[updateGroupOutput](err)
+	}
+
+	out := updateGroupOutput{
+		Alias: r.group.Alias, Name: updated.Name, Currency: updated.Currency,
+		YouAre: r.group.ParticipantName, Participants: spliit.ParticipantNames(updated),
+	}
+	return toolResult(fmt.Sprintf("Updated %q: %s. Participants are now %s.",
+		r.group.Alias, strings.Join(changes, "; "), strings.Join(out.Participants, ", ")), out)
+}
+
+// buildGroupForm merges the requested edits into the group's current state and
+// returns the full form Spliit expects, plus a human summary of what changed.
+// Every rejection names the valid options so the model can retry.
+func buildGroupForm(in updateGroupInput, group *model.Group, withExpenses []string, meID string) (shape.ModifyGroupForm, []string, error) {
+	form := shape.ModifyGroupForm{
+		Name:         group.Name,
+		Information:  group.Information,
+		Currency:     group.Currency,
+		CurrencyCode: group.CurrencyCode,
+	}
+	var changes []string
+
+	if name := strings.TrimSpace(in.Name); name != "" && name != group.Name {
+		form.Name = name
+		changes = append(changes, fmt.Sprintf("renamed to %q", name))
+	}
+	if cur := strings.TrimSpace(in.Currency); cur != "" && cur != group.Currency {
+		form.Currency = cur
+		changes = append(changes, "currency "+cur)
+	}
+
+	hasExpenses := make(map[string]bool, len(withExpenses))
+	for _, id := range withExpenses {
+		hasExpenses[id] = true
+	}
+
+	// Start from everyone currently in the group, then apply renames and
+	// removals against that list by ID.
+	type entry struct {
+		id   string
+		name string
+	}
+	current := make([]entry, 0, len(group.Participants))
+	for _, p := range group.Participants {
+		if p != nil {
+			current = append(current, entry{id: p.ID, name: p.Name})
+		}
+	}
+
+	for _, rn := range in.Rename {
+		p, err := findByName(group, rn.From)
+		if err != nil {
+			return form, nil, err
+		}
+		to := strings.TrimSpace(rn.To)
+		if to == "" {
+			return form, nil, fmt.Errorf("new name for %q is empty", p.Name)
+		}
+		for i := range current {
+			if current[i].id == p.ID {
+				current[i].name = to
+			}
+		}
+		changes = append(changes, fmt.Sprintf("%s renamed to %s", p.Name, to))
+	}
+
+	removed := map[string]bool{}
+	for _, name := range in.Remove {
+		p, err := findByName(group, name)
+		if err != nil {
+			return form, nil, err
+		}
+		if p.ID == meID {
+			return form, nil, fmt.Errorf(
+				"%s is you in this group; use set_active_participant to become somebody else before removing them", p.Name)
+		}
+		if hasExpenses[p.ID] {
+			return form, nil, fmt.Errorf(
+				"%s has expenses and cannot be removed; reassign or delete those expenses first", p.Name)
+		}
+		removed[p.ID] = true
+		changes = append(changes, "removed "+p.Name)
+	}
+
+	for _, e := range current {
+		if removed[e.id] {
+			continue
+		}
+		id := e.id
+		form.Participants = append(form.Participants, shape.ModifyGroupParticipant{ID: &id, Name: e.name})
+	}
+
+	for _, name := range in.Add {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		for _, p := range form.Participants {
+			if strings.EqualFold(strings.TrimSpace(p.Name), name) {
+				return form, nil, fmt.Errorf("a participant named %q is already in the group", name)
+			}
+		}
+		form.Participants = append(form.Participants, shape.ModifyGroupParticipant{Name: name})
+		changes = append(changes, "added "+name)
+	}
+
+	if len(form.Participants) == 0 {
+		return form, nil, fmt.Errorf("a group must keep at least one participant")
+	}
+	if len(changes) == 0 {
+		return form, nil, fmt.Errorf("nothing to change: the group already matches the request")
+	}
+	return form, changes, nil
 }
 
 // ---------------------------------------------------------------------------

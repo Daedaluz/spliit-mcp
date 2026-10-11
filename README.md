@@ -121,8 +121,8 @@ user across instances, so tools only ever need the alias.
 `delete_expense`, `get_stats`, `list_activities`, `list_categories`.
 
 **Group management**, mirroring the settings page — `inspect_group`,
-`join_group`, `leave_group`, `create_group`, `set_active_participant`,
-`get_server_info`.
+`join_group`, `leave_group`, `create_group`, `update_group`,
+`set_active_participant`, `get_server_info`.
 
 Every tool takes `group` (an alias from `list_groups`). `create_expense` defaults
 to you having paid, split evenly between all participants. For reading, pass
@@ -130,6 +130,15 @@ to you having paid, split evenly between all participants. For reading, pass
 "my latest expense" would otherwise answer with whoever paid last. `get_balances` is
 framed relative to you ("You owe 120.00 SEK overall"). Amounts are decimal
 strings in the group's currency — money never passes through a float.
+
+`update_expense` takes only the fields that change. Who paid, who shares the cost,
+the share counts and the split mode are carried over verbatim unless `paid_for` is
+passed, which is the one way to replace the split. The confirmation says whether
+the split was kept or changed.
+
+`update_group` edits a group in Spliit itself: its name, currency, and participants
+(add, rename, remove). Renames keep the participant's ID, so their expenses follow
+them; a participant with expenses cannot be removed.
 
 Joining always requires naming which participant is you, whether through the UI
 or `join_group`; `inspect_group` reads a group without joining so those names

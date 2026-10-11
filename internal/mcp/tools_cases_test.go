@@ -506,3 +506,95 @@ func TestListExpensesPagesUntilItFindsYours(t *testing.T) {
 		t.Errorf("did not page past a non-matching page: %s", text)
 	}
 }
+
+// Regression: adding receipt notes to an expense reset its split to "everyone,
+// evenly". Spliit's expense payload is not guaranteed to nest participant
+// objects under paidFor, and the old code derived the sharers from those names,
+// got an empty list, and fell through to the everyone default — discarding the
+// share counts and split mode along the way.
+func TestUpdateExpenseNotesOnlyKeepsTheSplitVerbatim(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.expenses.get"] = map[string]any{
+		"expense": map[string]any{
+			"id": "exp-1", "title": "Groceries", "amount": 30000,
+			"expenseDate": "2026-01-15T00:00:00Z",
+			"categoryId":  2,
+			"paidById":    "p-me",
+			"paidBy":      map[string]any{"id": "p-me", "name": "Tobias"},
+			// No nested "participant" objects, two of three members, unequal shares.
+			"paidFor": []map[string]any{
+				{"participantId": "p-me", "shares": 2},
+				{"participantId": "p-anna", "shares": 1},
+			},
+			"splitMode":       "BY_SHARES",
+			"isReimbursement": false,
+		},
+	}
+	env.spliit.results["groups.expenses.update"] = map[string]any{"expenseId": "exp-1"}
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "update_expense", map[string]any{
+		"group": "trip", "expense_id": "exp-1", "notes": "Milk, bread, eggs",
+	})
+	if isErr {
+		t.Fatalf("update_expense errored: %s", text)
+	}
+
+	form := env.spliit.inputFor("groups.expenses.update")["expenseFormValues"].(map[string]any)
+	if got := form["splitMode"]; got != "BY_SHARES" {
+		t.Errorf("splitMode = %v, want BY_SHARES preserved", got)
+	}
+	if got := form["notes"]; got != "Milk, bread, eggs" {
+		t.Errorf("notes = %v, want the new notes", got)
+	}
+	paidFor := form["paidFor"].([]any)
+	if len(paidFor) != 2 {
+		t.Fatalf("paidFor has %d entries, want the original 2 (not everyone): %v", len(paidFor), paidFor)
+	}
+	want := map[string]float64{"p-me": 2, "p-anna": 1}
+	for _, e := range paidFor {
+		m := e.(map[string]any)
+		id := m["participant"].(string)
+		if m["shares"] != want[id] {
+			t.Errorf("shares for %s = %v, want %v", id, m["shares"], want[id])
+		}
+	}
+	if !strings.Contains(text, "split unchanged") {
+		t.Errorf("summary should say the split was kept, got: %s", text)
+	}
+}
+
+// Passing paid_for is the one way to change the split, and the confirmation
+// says so, since the model otherwise cannot tell whether it altered the split.
+func TestUpdateExpensePaidForReplacesTheSplit(t *testing.T) {
+	env := setup(t)
+	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
+	env.spliit.results["groups.expenses.get"] = map[string]any{
+		"expense": map[string]any{
+			"id": "exp-1", "title": "Groceries", "amount": 30000,
+			"expenseDate": "2026-01-15T00:00:00Z", "paidById": "p-me",
+			"paidFor":   []map[string]any{{"participantId": "p-me", "shares": 2}},
+			"splitMode": "BY_SHARES",
+		},
+	}
+	env.spliit.results["groups.expenses.update"] = map[string]any{"expenseId": "exp-1"}
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	text, isErr := call(t, env.connect(t, "alice"), "update_expense", map[string]any{
+		"group": "trip", "expense_id": "exp-1", "paid_for": []string{"Anna", "Erik"},
+	})
+	if isErr {
+		t.Fatalf("update_expense errored: %s", text)
+	}
+	form := env.spliit.inputFor("groups.expenses.update")["expenseFormValues"].(map[string]any)
+	if got := form["splitMode"]; got != "EVENLY" {
+		t.Errorf("splitMode = %v, want EVENLY after an explicit paid_for", got)
+	}
+	if got := len(form["paidFor"].([]any)); got != 2 {
+		t.Errorf("paidFor has %d entries, want 2", got)
+	}
+	if !strings.Contains(text, "now split evenly between Anna, Erik") {
+		t.Errorf("summary should describe the new split, got: %s", text)
+	}
+}
