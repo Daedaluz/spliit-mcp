@@ -123,6 +123,16 @@ as the default, and leaving it clears it (`ON DELETE SET NULL`). Tools that
 change membership or setup embed `explicitGroupArg` and use `resolveExplicit`
 instead, so they never act on the default by omission.
 
+### Duplicate expenses
+
+`create_expense` refuses an expense with the same amount as an existing one
+dated within `duplicateWindow` (titles are ignored), returning the matches as a
+tool error that tells the model to ask the user, then retry with
+`allow_duplicate=true`. Only the user can tell one pizza entered twice from two
+pizzas. If the lookup itself fails, the expense is recorded with a note that the
+check was skipped: failing closed would let a broken list call block every
+expense, as the `deleteAt` decode failure once did.
+
 ### Tool errors
 
 Return `toolError(err)`, not a Go error. These become `IsError` results so the
