@@ -65,7 +65,9 @@ func (t *tools) register(s *mcp.Server) {
 		Name:  "create_expense",
 		Title: "Record an expense",
 		Description: "Record a new expense. Defaults to you having paid, split evenly between " +
-			"all participants. Amounts are decimal numbers in the group's currency.",
+			"all participants. Amounts are decimal numbers in the group's currency. If an expense " +
+			"with the same amount within two days exists, nothing is recorded and the match is " +
+			"returned: ask the user before retrying with allow_duplicate=true.",
 	}, t.createExpense)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -720,6 +722,9 @@ type expenseWriteInput struct {
 	// IsReimbursement marks a payment settling an existing debt rather than a
 	// new shared cost.
 	IsReimbursement bool `json:"is_reimbursement,omitempty" jsonschema:"True if this is a repayment settling a debt"`
+	// AllowDuplicate skips the duplicate check. Only create_expense reads it,
+	// and only after the user has said the match is a different expense.
+	AllowDuplicate bool `json:"allow_duplicate,omitempty" jsonschema:"Set only after the user has confirmed this is not the possible duplicate an earlier call reported"`
 
 	// keepSplit, when set, is the existing expense whose split (participants,
 	// shares and mode) must be sent back unchanged. update_expense sets it when
@@ -757,6 +762,23 @@ func (t *tools) createExpense(ctx context.Context, req *mcp.CallToolRequest, in 
 		return toolError[createExpenseOutput](err)
 	}
 
+	// A repeated request ("add the pizza", then again later) would otherwise
+	// silently double-charge everyone, and only the user knows whether two
+	// equal expenses are one or two. So stop, and have the caller ask them.
+	var checkNote string
+	if !in.AllowDuplicate {
+		matches, err := t.likelyDuplicates(ctx, r, form)
+		switch {
+		case err != nil:
+			// Failing closed would make a broken list call block every
+			// expense; record it, but say the check did not happen.
+			t.deps.Log.Warn("duplicate check failed", "group", r.group.Alias, "err", err)
+			checkNote = " (Could not check for duplicates: " + err.Error() + ".)"
+		case len(matches) > 0:
+			return toolError[createExpenseOutput](duplicateError(matches, r.group.Currency))
+		}
+	}
+
 	me := participantOrNil(r.group.ParticipantID)
 	id, err := t.deps.Clients.CreateExpense(ctx, r.baseURL(), r.spliitID(), form, me)
 	if err != nil {
@@ -768,9 +790,73 @@ func (t *tools) createExpense(ctx context.Context, req *mcp.CallToolRequest, in 
 		Amount: form.Amount.AsDecimal().StringFixed(2),
 		PaidBy: names.paidBy, PaidFor: names.paidFor,
 	}
-	return toolResult(fmt.Sprintf("Recorded %q for %s %s, paid by %s, split between %s.",
+	return toolResult(fmt.Sprintf("Recorded %q for %s %s, paid by %s, split between %s.%s",
 		form.Title, out.Amount, r.group.Currency, names.paidBy,
-		strings.Join(names.paidFor, ", ")), out)
+		strings.Join(names.paidFor, ", "), checkNote), out)
+}
+
+// duplicateWindow is how far apart two expenses' dates may be and still count
+// as the same one entered twice: a re-entry often lands on "today" while the
+// original carried the day it happened.
+const duplicateWindow = 2 * 24 * time.Hour
+
+// likelyDuplicates returns the group's existing expenses with the same amount
+// dated within duplicateWindow of form. Titles are ignored on purpose: the same
+// pizza is "Pizza" one time and "pizza dinner" the next.
+func (t *tools) likelyDuplicates(ctx context.Context, r resolved, form shape.ModifyExpenseForm) ([]model.Expense, error) {
+	from := form.ExpenseDate.Add(-duplicateWindow)
+	to := form.ExpenseDate.Add(duplicateWindow)
+
+	var matches []model.Expense
+	limit, cursor := 50, 0
+	// Spliit lists newest first by expense date, so paging stops once a page
+	// reaches past the window. The bound keeps a huge group from being walked
+	// end to end for a backdated expense.
+	for page := 0; page < 10; page++ {
+		var cursorArg *int
+		if cursor > 0 {
+			cursorArg = &cursor
+		}
+		result, err := t.deps.Clients.ListExpenses(ctx, r.baseURL(), r.spliitID(), &limit, cursorArg, nil)
+		if err != nil {
+			return nil, err
+		}
+		pastWindow := false
+		for _, e := range result.Expenses {
+			if e.ExpenseDate.Before(from) {
+				pastWindow = true
+				continue
+			}
+			if !e.ExpenseDate.After(to) && e.Amount == form.Amount {
+				matches = append(matches, e)
+			}
+		}
+		if pastWindow || !result.HasMore {
+			break
+		}
+		cursor = result.NextCursor
+	}
+	return matches, nil
+}
+
+// duplicateError tells the calling model what matched and that the decision
+// is the user's, so it asks rather than retrying on its own.
+func duplicateError(matches []model.Expense, currency string) error {
+	lines := make([]string, 0, len(matches))
+	for _, e := range matches {
+		payer := e.PaidByID
+		if e.PaidBy != nil {
+			payer = e.PaidBy.Name
+		}
+		lines = append(lines, fmt.Sprintf("- %q, %s %s on %s, paid by %s (expense_id %s)",
+			e.Title, e.Amount.AsDecimal().StringFixed(2), currency,
+			e.ExpenseDate.Format(time.DateOnly), payer, e.ID))
+	}
+	return fmt.Errorf("not recorded: this looks like an expense that already exists:\n%s\n"+
+		"Ask the user whether this is the same expense. If they say it is a different one, "+
+		"call create_expense again with the same arguments and allow_duplicate=true; "+
+		"otherwise do not record it. Do not set allow_duplicate without asking them.",
+		strings.Join(lines, "\n"))
 }
 
 // updateExpenseInput deliberately does not embed expenseWriteInput: every field
