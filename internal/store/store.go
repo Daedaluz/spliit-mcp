@@ -35,12 +35,15 @@ func New(database *db.DB) *Store { return &Store{db: database} }
 
 // User is an authenticated principal, keyed by OIDC subject.
 type User struct {
-	Sub         string    `db:"sub" json:"sub"`
-	Issuer      string    `db:"issuer" json:"issuer"`
-	Email       string    `db:"email" json:"email"`
-	DisplayName string    `db:"display_name" json:"display_name"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	Sub         string `db:"sub" json:"sub"`
+	Issuer      string `db:"issuer" json:"issuer"`
+	Email       string `db:"email" json:"email"`
+	DisplayName string `db:"display_name" json:"display_name"`
+	// DefaultGroupID is the group MCP tools use when a call names none. It is
+	// always one of the user's own groups, and is cleared when that group is.
+	DefaultGroupID *string   `db:"default_group_id" json:"default_group_id"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // Group is a Spliit group a user has made available to MCP, together with the
@@ -129,6 +132,48 @@ func (s *Store) SetDisplayName(ctx context.Context, sub, displayName string) err
 		return fmt.Errorf("set display name: %w", err)
 	}
 	return requireAffected(res)
+}
+
+// SetDefaultGroup sets the group MCP tools fall back to, by internal ID. An
+// empty ID clears it. A group that is not the user's own is ErrNotFound: the
+// default feeds ResolveGroup, so it must never point outside the user's rows.
+func (s *Store) SetDefaultGroup(ctx context.Context, sub, groupID string) error {
+	now := time.Now().UTC()
+	if groupID == "" {
+		res, err := s.db.ExecContext(ctx, s.rebind(
+			`UPDATE users SET default_group_id = NULL, updated_at = ? WHERE sub = ?`,
+		), now, sub)
+		if err != nil {
+			return fmt.Errorf("clear default group: %w", err)
+		}
+		return requireAffected(res)
+	}
+
+	res, err := s.db.ExecContext(ctx, s.rebind(
+		`UPDATE users SET default_group_id = ?, updated_at = ?
+		 WHERE sub = ? AND EXISTS (SELECT 1 FROM groups WHERE id = ? AND user_sub = ?)`,
+	), groupID, now, sub, groupID, sub)
+	if err != nil {
+		return wrapWriteErr("set default group", err)
+	}
+	return requireAffected(res)
+}
+
+// DefaultGroup returns the user's default group, or ErrNotFound when none is set.
+func (s *Store) DefaultGroup(ctx context.Context, sub string) (*Group, error) {
+	var g Group
+	err := s.db.GetContext(ctx, &g, s.rebind(
+		`SELECT g.* FROM groups g
+		 JOIN users u ON u.default_group_id = g.id AND u.sub = g.user_sub
+		 WHERE u.sub = ?`,
+	), sub)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("default group: %w", err)
+	}
+	return &g, nil
 }
 
 // CreateGroup makes a Spliit group available to a user's MCP session.

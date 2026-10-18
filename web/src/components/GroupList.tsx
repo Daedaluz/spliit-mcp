@@ -102,6 +102,7 @@ function GroupRow({ group, data }: { group: Group; data: AppData }) {
             <div className="list-title">
               <code>{group.alias}</code>
               <span className="muted"> — {group.group_name}</span>
+              {data.me.default_group_id === group.id && <span className="badge">default</span>}
             </div>
             <div className="muted small">
               {group.host} · {group.currency} ·{' '}

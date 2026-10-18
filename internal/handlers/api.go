@@ -13,44 +13,79 @@ import (
 	"github.com/daedaluz/spliit-mcp/internal/store"
 )
 
-// GetMe returns the signed-in user's identity and the display name used to
-// recognise them among group participants.
+// GetMe returns the signed-in user's identity, the display name used to
+// recognise them among group participants, and their default group.
 func (s *Server) GetMe(c *gin.Context) {
-	user := UserFromContext(c)
-	c.JSON(http.StatusOK, gin.H{
-		"sub":          user.Sub,
-		"email":        user.Email,
-		"display_name": user.DisplayName,
-	})
+	c.JSON(http.StatusOK, meResponse(UserFromContext(c)))
 }
 
-// UpdateMe changes the display name. This is the "who you are" half of the
-// config page: it is the default used to find your participant when adding a
-// group.
+// UpdateMe changes the user's own settings: the display name, which is the
+// default used to find your participant when adding a group, and the default
+// group, which MCP tools use when a call names none. Either may be sent alone;
+// a field left out is unchanged, and an empty default_group_id clears it.
 func (s *Server) UpdateMe(c *gin.Context) {
 	user := UserFromContext(c)
+	ctx := c.Request.Context()
 
 	var body struct {
-		DisplayName string `json:"display_name"`
+		DisplayName    *string `json:"display_name"`
+		DefaultGroupID *string `json:"default_group_id"`
 	}
 	if err := bindJSON(c, &body); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
-	name := strings.TrimSpace(body.DisplayName)
-	if name == "" {
-		writeError(c, http.StatusBadRequest, "display_name must not be empty")
+	if body.DisplayName == nil && body.DefaultGroupID == nil {
+		writeError(c, http.StatusBadRequest, "nothing to update; send display_name or default_group_id")
 		return
 	}
 
-	if err := s.store.SetDisplayName(c.Request.Context(), user.Sub, name); err != nil {
-		s.serverError(c, "set display name", err)
+	var name string
+	if body.DisplayName != nil {
+		name = strings.TrimSpace(*body.DisplayName)
+		if name == "" {
+			writeError(c, http.StatusBadRequest, "display_name must not be empty")
+			return
+		}
+	}
+
+	if body.DefaultGroupID != nil {
+		err := s.store.SetDefaultGroup(ctx, user.Sub, strings.TrimSpace(*body.DefaultGroupID))
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeError(c, http.StatusNotFound, "group not found")
+			return
+		case err != nil:
+			s.serverError(c, "set default group", err)
+			return
+		}
+	}
+	if body.DisplayName != nil {
+		if err := s.store.SetDisplayName(ctx, user.Sub, name); err != nil {
+			s.serverError(c, "set display name", err)
+			return
+		}
+	}
+
+	updated, err := s.store.GetUser(ctx, user.Sub)
+	if err != nil {
+		s.serverError(c, "get user", err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"sub": user.Sub, "email": user.Email, "display_name": name,
-	})
+	c.JSON(http.StatusOK, meResponse(updated))
+}
+
+func meResponse(u *store.User) gin.H {
+	defaultGroupID := ""
+	if u.DefaultGroupID != nil {
+		defaultGroupID = *u.DefaultGroupID
+	}
+	return gin.H{
+		"sub":              u.Sub,
+		"email":            u.Email,
+		"display_name":     u.DisplayName,
+		"default_group_id": defaultGroupID,
+	}
 }
 
 // GetConfig returns the details needed to connect an MCP client to this server.

@@ -122,9 +122,12 @@ user across instances, so tools only ever need the alias.
 
 **Group management**, mirroring the settings page — `inspect_group`,
 `join_group`, `leave_group`, `create_group`, `update_group`,
-`set_active_participant`, `get_server_info`.
+`set_active_participant`, `set_default_group`, `get_server_info`.
 
-Every tool takes `group` (an alias from `list_groups`). `create_expense` defaults
+Every tool takes `group` (an alias from `list_groups`). Leave it out to use your
+default group, set with `set_default_group` or on the settings page; tools that
+change membership or setup (`leave_group`, `update_group`,
+`set_active_participant`) always need it named. `create_expense` defaults
 to you having paid, split evenly between all participants. For reading, pass
 `mine=true` to `list_expenses` — an unfiltered list is the whole group's, so
 "my latest expense" would otherwise answer with whoever paid last. `get_balances` is

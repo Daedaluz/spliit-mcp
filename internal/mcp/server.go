@@ -76,6 +76,8 @@ func NewServer(deps Deps) *mcp.Server {
 		WebsiteURL: t.configURL(),
 	}, &mcp.ServerOptions{
 		Instructions: "Each tool takes a `group`, which is the alias shown by list_groups. " +
+			"Leave it out to use the user's default group (marked in list_groups, changed with " +
+			"set_default_group); if no default is set, the call says so and names the options. " +
 			"Only groups the signed-in user has registered are reachable. " +
 			"Amounts are in the group's currency as decimal numbers, e.g. 12.50. " +
 			"When the user says \"I\", \"me\" or \"my\", that means the participant set as them " +
@@ -134,10 +136,19 @@ func (t *tools) userFromRequest(req *mcp.CallToolRequest) (string, error) {
 }
 
 // resolve turns a user-supplied group reference into a concrete group plus its
-// server, refusing anything the caller has not registered.
+// server, refusing anything the caller has not registered. An empty reference
+// means the caller's default group.
 func (t *tools) resolve(ctx context.Context, sub, ref string) (resolved, error) {
-	if ref == "" {
-		return resolved{}, errors.New("group is required; call list_groups to see the available ones")
+	if strings.TrimSpace(ref) == "" {
+		group, err := t.deps.Store.DefaultGroup(ctx, sub)
+		if errors.Is(err, store.ErrNotFound) {
+			return resolved{}, errors.New("no group given and you have no default group; " +
+				"pass group (call list_groups to see them), or set a default with set_default_group")
+		}
+		if err != nil {
+			return resolved{}, err
+		}
+		return resolved{group: group}, nil
 	}
 
 	group, err := t.deps.Store.ResolveGroup(ctx, sub, ref)
@@ -150,6 +161,15 @@ func (t *tools) resolve(ctx context.Context, sub, ref string) (resolved, error) 
 		return resolved{}, err
 	}
 	return resolved{group: group}, nil
+}
+
+// resolveExplicit is resolve for tools that change a group's membership or
+// setup, where acting on the default by omission would be too easy a mistake.
+func (t *tools) resolveExplicit(ctx context.Context, sub, ref string) (resolved, error) {
+	if strings.TrimSpace(ref) == "" {
+		return resolved{}, errors.New("group is required; call list_groups to see the available ones")
+	}
+	return t.resolve(ctx, sub, ref)
 }
 
 // baseURLFor picks the Spliit instance for a request that is not yet tied to a

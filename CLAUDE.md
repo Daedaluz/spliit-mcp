@@ -116,6 +116,13 @@ Spliit mints a fresh participant ID when one is removed and re-added, so a
 pinned ID can go stale. Handlers detect this and return an error naming the fix
 (`set_active_participant`, or the "Change you" button) rather than guessing.
 
+A user may also pin a **default group** (`users.default_group_id`, set through
+`PUT /api/me` or `set_default_group`). `tools.resolve` falls back to it when
+`group` is empty, so the store only ever accepts one of the user's own groups
+as the default, and leaving it clears it (`ON DELETE SET NULL`). Tools that
+change membership or setup embed `explicitGroupArg` and use `resolveExplicit`
+instead, so they never act on the default by omission.
+
 ### Tool errors
 
 Return `toolError(err)`, not a Go error. These become `IsError` results so the

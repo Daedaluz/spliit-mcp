@@ -9,6 +9,8 @@ export interface Me {
   sub: string
   email: string
   display_name: string
+  /** Group ID MCP tools use when a call names none; empty when unset. */
+  default_group_id: string
 }
 
 /** How to reach this server, as the server itself understands it. */
@@ -87,6 +89,10 @@ export const api = {
 
   setDisplayName: (display_name: string) =>
     request<Me>('/api/me', { method: 'PUT', body: JSON.stringify({ display_name }) }),
+
+  /** Pass an empty ID to clear the default. */
+  setDefaultGroup: (default_group_id: string) =>
+    request<Me>('/api/me', { method: 'PUT', body: JSON.stringify({ default_group_id }) }),
 
   listGroups: () => request<{ groups: Group[] }>('/api/groups').then((r) => r.groups),
 
