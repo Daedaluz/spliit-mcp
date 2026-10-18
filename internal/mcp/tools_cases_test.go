@@ -112,6 +112,24 @@ func TestCreateExpenseDefaultsToYouAndSplitsEvenly(t *testing.T) {
 	}
 }
 
+// Spliit adds fields to its models over time (groups gained deleteAt with group
+// deletion). A field we do not know about must not fail the call.
+func TestCreateExpenseToleratesNewGroupFields(t *testing.T) {
+	env := setup(t)
+	group := sampleGroup()
+	group["deleteAt"] = nil
+	group["somethingNewer"] = "x"
+	env.spliit.results["groups.get"] = map[string]any{"group": group}
+	env.spliit.results["groups.expenses.create"] = map[string]any{"expenseId": "exp-1"}
+	env.seed(t, "alice", "trip", "grp-1", "p-me", "Tobias")
+
+	if text, isErr := call(t, env.connect(t, "alice"), "create_expense", map[string]any{
+		"group": "trip", "title": "Dinner", "amount": "100",
+	}); isErr {
+		t.Fatalf("create_expense errored on a group with unknown fields: %s", text)
+	}
+}
+
 func TestCreateExpenseRoundsToCents(t *testing.T) {
 	env := setup(t)
 	env.spliit.results["groups.get"] = map[string]any{"group": sampleGroup()}
