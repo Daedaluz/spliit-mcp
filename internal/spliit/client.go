@@ -10,7 +10,6 @@ package spliit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -73,39 +72,21 @@ func (c *Clients) For(baseURL string) api.Client {
 // The library reports failures in two places: an error from SendRequests for
 // transport-level problems, and a per-call error for tRPC-level ones. Both must
 // be checked or a failed call silently yields a zero value.
-//
-// The call goes out through rawEndpoint and the output is decoded here. The
-// library decodes responses with DisallowUnknownFields, so every Spliit release
-// that adds a field (groups gained deleteAt with group deletion) would
-// otherwise break each call returning that model.
 func send[TIn, TOut any](
 	ctx context.Context, client api.Client,
 	ep endpoint.Endpoint[TIn, TOut], input TIn,
 ) (TOut, error) {
 	var zero TOut
 
-	call := api.NewCall[TIn, json.RawMessage](rawEndpoint[TIn, TOut]{ep}, input)
+	call := api.NewCall(ep, input)
 	if _, err := client.SendRequests(ctx, call); err != nil {
 		return zero, fmt.Errorf("spliit %s: %w", ep.Name(), err)
 	}
 	if err := call.ErrValue(); err != nil {
 		return zero, fmt.Errorf("spliit %s: %w", ep.Name(), err)
 	}
-
-	var out TOut
-	if err := json.Unmarshal(call.Output(), &out); err != nil {
-		return zero, fmt.Errorf("spliit %s: decoding response: %w", ep.Name(), err)
-	}
-	return out, nil
+	return call.Output(), nil
 }
-
-// rawEndpoint is ep with its output left as raw JSON, which the library passes
-// through without its strict decode.
-type rawEndpoint[TIn, TOut any] struct {
-	endpoint.Endpoint[TIn, TOut]
-}
-
-func (rawEndpoint[TIn, TOut]) OutputShape() json.RawMessage { return nil }
 
 // GetGroup fetches a group, including its participant list.
 func (c *Clients) GetGroup(ctx context.Context, baseURL, groupID string) (*model.Group, error) {

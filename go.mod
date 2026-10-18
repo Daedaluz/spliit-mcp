@@ -85,3 +85,8 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// Fork with lenient response decoding and Group.DeleteAt, so new Spliit fields
+// do not break every call. Drop once https://github.com/RikudouSage/SpliitApi/issues/2
+// is fixed upstream.
+replace go.chrastecky.dev/spliit-api => github.com/daedaluz/SpliitApi v0.9.4-0.20261018092744-90bfc8649347
