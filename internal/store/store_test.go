@@ -278,3 +278,59 @@ func TestSessions(t *testing.T) {
 		}
 	})
 }
+
+func TestDefaultGroup(t *testing.T) {
+	eachEngine(t, func(t *testing.T, s *store.Store) {
+		ctx := context.Background()
+
+		for _, sub := range []string{"alice", "bob"} {
+			if _, err := s.UpsertUser(ctx, sub, "https://issuer", "", sub); err != nil {
+				t.Fatalf("user %s: %v", sub, err)
+			}
+		}
+		g, err := s.CreateGroup(ctx, &store.Group{
+			UserSub: "alice", BaseURL: "https://spliit.app/api/trpc", SpliitGroupID: "secret-group",
+			Alias: "trip", ParticipantID: "p1", ParticipantName: "Alice",
+		})
+		if err != nil {
+			t.Fatalf("group: %v", err)
+		}
+
+		if _, err := s.DefaultGroup(ctx, "alice"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("default before set: err = %v, want ErrNotFound", err)
+		}
+		if err := s.SetDefaultGroup(ctx, "alice", g.ID); err != nil {
+			t.Fatalf("set default: %v", err)
+		}
+		got, err := s.DefaultGroup(ctx, "alice")
+		if err != nil || got.ID != g.ID {
+			t.Fatalf("default = %v, %v; want %s", got, err, g.ID)
+		}
+		if u, _ := s.GetUser(ctx, "alice"); u.DefaultGroupID == nil || *u.DefaultGroupID != g.ID {
+			t.Errorf("user.DefaultGroupID = %v, want %s", u.DefaultGroupID, g.ID)
+		}
+
+		// Another user's group can never become your default.
+		if err := s.SetDefaultGroup(ctx, "bob", g.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("bob defaulting to alice's group: err = %v, want ErrNotFound", err)
+		}
+		if _, err := s.DefaultGroup(ctx, "bob"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("bob's default: err = %v, want ErrNotFound", err)
+		}
+
+		// Leaving the group clears the default instead of leaving it dangling.
+		if err := s.DeleteGroup(ctx, "alice", g.ID); err != nil {
+			t.Fatalf("delete group: %v", err)
+		}
+		if _, err := s.DefaultGroup(ctx, "alice"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("default after leaving: err = %v, want ErrNotFound", err)
+		}
+		if u, _ := s.GetUser(ctx, "alice"); u.DefaultGroupID != nil {
+			t.Errorf("user.DefaultGroupID after leaving = %v, want nil", *u.DefaultGroupID)
+		}
+
+		if err := s.SetDefaultGroup(ctx, "alice", ""); err != nil {
+			t.Errorf("clearing an unset default: %v", err)
+		}
+	})
+}

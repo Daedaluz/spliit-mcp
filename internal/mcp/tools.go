@@ -18,6 +18,12 @@ import (
 
 // groupArg is embedded by every tool input that targets one group.
 type groupArg struct {
+	Group string `json:"group,omitempty" jsonschema:"The group alias from list_groups; omit to use your default group"`
+}
+
+// explicitGroupArg is groupArg for tools that must name their group: those that
+// change membership or setup, where falling back to the default is a trap.
+type explicitGroupArg struct {
 	Group string `json:"group" jsonschema:"The group alias from list_groups"`
 }
 
@@ -146,6 +152,13 @@ func (t *tools) register(s *mcp.Server) {
 		Description: "Change which participant represents you in a group. Use this if the " +
 			"participant was renamed or re-created in Spliit.",
 	}, t.setActiveParticipant)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "set_default_group",
+		Title: "Set your default group",
+		Description: "Choose the group other tools use when the call names none, e.g. so " +
+			"\"add 120 for pizza\" lands in the right group. Pass clear=true to remove it.",
+	}, t.setDefaultGroup)
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +178,8 @@ type groupSummary struct {
 	NeedsSetup      bool   `json:"needs_setup,omitempty"`
 	SpliitGroupID   string `json:"spliit_group_id"`
 	SetupHintForYou string `json:"setup_hint,omitempty"`
+	// Default marks the group used when a tool call names none.
+	Default bool `json:"default,omitempty"`
 }
 
 type listGroupsOutput struct {
@@ -181,6 +196,10 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 	if err != nil {
 		return toolError[listGroupsOutput](err)
 	}
+	user, err := t.deps.Store.GetUser(ctx, sub)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return toolError[listGroupsOutput](err)
+	}
 
 	out := listGroupsOutput{Groups: make([]groupSummary, 0, len(groups))}
 	for _, g := range groups {
@@ -193,6 +212,7 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 			SpliitGroupID: g.SpliitGroupID,
 			ServerURL:     g.BaseURL,
 			URL:           spliit.WebURL(g.BaseURL, g.SpliitGroupID),
+			Default:       user != nil && user.DefaultGroupID != nil && *user.DefaultGroupID == g.ID,
 		}
 		if g.ParticipantID == "" {
 			summary.NeedsSetup = true
@@ -219,6 +239,9 @@ func (t *tools) listGroups(ctx context.Context, req *mcp.CallToolRequest, _ list
 		}
 		if g.NeedsSetup {
 			line += " — no participant set as you"
+		}
+		if g.Default {
+			line += " (default)"
 		}
 		lines = append(lines, line)
 	}
@@ -1489,7 +1512,7 @@ func (t *tools) joinGroup(ctx context.Context, req *mcp.CallToolRequest, in join
 // leave_group
 
 type leaveGroupInput struct {
-	groupArg
+	explicitGroupArg
 }
 
 type leaveGroupOutput struct {
@@ -1504,7 +1527,7 @@ func (t *tools) leaveGroup(ctx context.Context, req *mcp.CallToolRequest, in lea
 	if err != nil {
 		return toolError[leaveGroupOutput](err)
 	}
-	r, err := t.resolve(ctx, sub, in.Group)
+	r, err := t.resolveExplicit(ctx, sub, in.Group)
 	if err != nil {
 		return toolError[leaveGroupOutput](err)
 	}
@@ -1523,7 +1546,7 @@ func (t *tools) leaveGroup(ctx context.Context, req *mcp.CallToolRequest, in lea
 // set_active_participant
 
 type setActiveParticipantInput struct {
-	groupArg
+	explicitGroupArg
 	You string `json:"you" jsonschema:"Which participant in the group is you"`
 }
 
@@ -1539,7 +1562,7 @@ func (t *tools) setActiveParticipant(ctx context.Context, req *mcp.CallToolReque
 	if err != nil {
 		return toolError[setActiveParticipantOutput](err)
 	}
-	r, err := t.resolve(ctx, sub, in.Group)
+	r, err := t.resolveExplicit(ctx, sub, in.Group)
 	if err != nil {
 		return toolError[setActiveParticipantOutput](err)
 	}
@@ -1568,6 +1591,44 @@ func (t *tools) setActiveParticipant(ctx context.Context, req *mcp.CallToolReque
 }
 
 // ---------------------------------------------------------------------------
+// set_default_group
+
+type setDefaultGroupInput struct {
+	Group string `json:"group,omitempty" jsonschema:"The group alias from list_groups to make the default"`
+	Clear bool   `json:"clear,omitempty" jsonschema:"True to remove the default instead, so every call must name its group"`
+}
+
+type setDefaultGroupOutput struct {
+	// DefaultGroup is the alias now used by default; empty once cleared.
+	DefaultGroup string `json:"default_group"`
+}
+
+func (t *tools) setDefaultGroup(ctx context.Context, req *mcp.CallToolRequest, in setDefaultGroupInput) (*mcp.CallToolResult, setDefaultGroupOutput, error) {
+	sub, err := t.userFromRequest(req)
+	if err != nil {
+		return toolError[setDefaultGroupOutput](err)
+	}
+
+	if in.Clear {
+		if err := t.deps.Store.SetDefaultGroup(ctx, sub, ""); err != nil {
+			return toolError[setDefaultGroupOutput](err)
+		}
+		return toolResult("Default group cleared; tools now need a group named in each call.",
+			setDefaultGroupOutput{})
+	}
+
+	r, err := t.resolveExplicit(ctx, sub, in.Group)
+	if err != nil {
+		return toolError[setDefaultGroupOutput](err)
+	}
+	if err := t.deps.Store.SetDefaultGroup(ctx, sub, r.group.ID); err != nil {
+		return toolError[setDefaultGroupOutput](err)
+	}
+	return toolResult(fmt.Sprintf("%q is now your default group.", r.group.Alias),
+		setDefaultGroupOutput{DefaultGroup: r.group.Alias})
+}
+
+// ---------------------------------------------------------------------------
 // update_group
 
 type renameParticipant struct {
@@ -1576,7 +1637,7 @@ type renameParticipant struct {
 }
 
 type updateGroupInput struct {
-	groupArg
+	explicitGroupArg
 	Name     string `json:"name,omitempty" jsonschema:"New group name"`
 	Currency string `json:"currency,omitempty" jsonschema:"New currency symbol or code, e.g. SEK"`
 	// Participant edits are expressed as deltas; Spliit itself takes the full
@@ -1604,7 +1665,7 @@ func (t *tools) updateGroup(ctx context.Context, req *mcp.CallToolRequest, in up
 	if err != nil {
 		return toolError[updateGroupOutput](err)
 	}
-	r, err := t.resolve(ctx, sub, in.Group)
+	r, err := t.resolveExplicit(ctx, sub, in.Group)
 	if err != nil {
 		return toolError[updateGroupOutput](err)
 	}
